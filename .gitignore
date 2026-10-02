@@ -1,9 +1,7 @@
 # All Markdown notes stay local — except the project README.
 *.md
+*.svg
 !/README.md
-
-# Claude Code session/config folder
-.claude/
 
 # CMake build output (binaries, fetched deps, .deb packages)
 build/
