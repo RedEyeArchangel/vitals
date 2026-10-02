@@ -206,7 +206,7 @@ Optional system components used when present (not bundled): `ryzen_smu` kernel m
 Vitals can change GPU clocks, voltages, power limits and fan behaviour, and its
 daemons run with root privileges. Incorrect settings can cause instability, data
 loss, hardware damage or a voided warranty. This software is provided "as is",
-without warranty of any kind; you use it entirely at your own risk and are
+without warranty of any kind. you use it entirely at your own risk and are
 responsible for any changes you apply. The 10-second safe-apply revert reduces
 the risk of a bad setting but does not eliminate it.
 
