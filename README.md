@@ -206,3 +206,12 @@ Optional system components used when present (not bundled): `ryzen_smu` kernel m
 **vitals** — © 2026 RedEyeArchangel — is licensed under **[CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/)** (Attribution-NonCommercial-ShareAlike). See [`LICENSE`](LICENSE).
 
 Third-party components keep their own licenses (table above). The GPLv3 `ram_oc/` sources are built only into the separate `ram_oc_daemon` executable, which is therefore GPLv3 itself; `vitals` talks to it only over IPC and links no GPL code.
+
+
+## 💖 Support the Project
+
+If you find this project useful, consider supporting its development:
+
+[![GitHub Sponsors](https://img.shields.io/badge/Sponsor-GitHub-ea4aaa?style=for-the-badge&logo=github&logoColor=white)](https://github.com/sponsors/RedEyeArchangel)
+
+*Your support helps maintain open-source projects like this and enables new features to be built!*
