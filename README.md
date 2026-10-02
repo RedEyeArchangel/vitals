@@ -201,6 +201,18 @@ sudo apt remove vitals-gpud vitals
 
 Optional system components used when present (not bundled): `ryzen_smu` kernel module, `nct6687d` kernel module, AMD `amdgpu` sysfs interfaces, Nvidia NVML (`libnvidia-ml.so.1`) and NvAPI (`libnvidia-api.so.1`).
 
+## Compatibility
+
+| Feature | AMD Ryzen + AMD GPU | Nvidia GPU | Intel CPU / GPU |
+|---|---|---|---|
+| Task manager & monitoring | ✅ | ✅ | ✅ |
+| Benchmarks | ✅ | ✅ | ✅ |
+| RAM timings / SMU telemetry | ✅ (needs `ryzen_smu`) | n/a | ❌ not supported |
+| GPU overclocking & fan control | ✅ | ⚠️ experimental | ❌ not supported |
+
+Tested on Ubuntu (AMD Ryzen 9 5900X + RX 7800 XT, and an Intel system for
+monitoring only). Other distributions are untested.
+
 ## Disclaimer
 
 Vitals can change GPU clocks, voltages, power limits and fan behaviour, and its
