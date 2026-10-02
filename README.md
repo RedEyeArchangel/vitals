@@ -201,6 +201,15 @@ sudo apt remove vitals-gpud vitals
 
 Optional system components used when present (not bundled): `ryzen_smu` kernel module, `nct6687d` kernel module, AMD `amdgpu` sysfs interfaces, Nvidia NVML (`libnvidia-ml.so.1`) and NvAPI (`libnvidia-api.so.1`).
 
+## Disclaimer
+
+Vitals can change GPU clocks, voltages, power limits and fan behaviour, and its
+daemons run with root privileges. Incorrect settings can cause instability, data
+loss, hardware damage or a voided warranty. This software is provided "as is",
+without warranty of any kind; you use it entirely at your own risk and are
+responsible for any changes you apply. The 10-second safe-apply revert reduces
+the risk of a bad setting but does not eliminate it.
+
 ## License
 
 **vitals** — © 2026 RedEyeArchangel — is licensed under **[CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/)** (Attribution-NonCommercial-ShareAlike). See [`LICENSE`](LICENSE).
