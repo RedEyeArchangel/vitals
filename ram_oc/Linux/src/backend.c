@@ -1,0 +1,1298 @@
+#include "backend.h"
+#include "pm_table.h"
+#include "dram.h"
+#include "util.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <dirent.h>
+#include <ctype.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <math.h>
+#include <time.h>
+
+#define SMU_PATH "/sys/kernel/ryzen_smu_drv"
+
+/* GCC conservatively warns about format truncation for sysfs path buffers
+ * because it can't statically bound hwmon directory name lengths. All path
+ * buffers here are 640 bytes — more than sufficient for any sysfs path. */
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+
+/* system() is marked warn_unused_result in glibc; we genuinely don't care
+ * about the exit code for best-effort modprobe/shell calls. */
+static void run_shell(const char *cmd) { int r = system(cmd); (void)r; }
+
+/* ── Cached static data ─────────────────────────────────────────────── */
+static int  s_cached_static = 0;
+static int  s_smu_ok = 0;          /* cached backend_is_supported() result */
+static int  s_physical_cores = -1;
+static int  s_loaded_aod_voltages = 0;
+static int  s_loaded_ryzen_smu    = 0;
+static int  s_loaded_tuxbench     = 0;
+static char s_processor_name[STR_LEN];
+static char s_board_product[STR_LEN];
+static char s_bios_version[STR_LEN];
+static char s_bios_date[STR_SHORT];
+static char s_agesa_version[STR_LEN];
+static memory_module_t s_modules[MAX_MODULES];
+static int  s_module_count;
+static mem_type_t s_dmi_mem_type = MEM_UNKNOWN; /* from dmidecode "Type:", any vendor */
+
+/* Previous /proc/stat per-logical-cpu times for usage delta */
+#define MAX_LOGICAL_CPUS 256
+static uint64_t s_prev_idle[MAX_LOGICAL_CPUS];
+static uint64_t s_prev_total[MAX_LOGICAL_CPUS];
+static int      s_prev_valid[MAX_LOGICAL_CPUS];
+
+/* ── Helpers ────────────────────────────────────────────────────────── */
+
+static int read_smu_string(const char *name, char *buf, size_t sz)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s", SMU_PATH, name);
+    return read_file_string(path, buf, sz);
+}
+
+static uint32_t read_smu_uint32(const char *name)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s", SMU_PATH, name);
+    uint8_t buf[4];
+    if (read_file_bytes(path, buf, 4) < 4) return 0;
+    return (uint32_t)buf[0] | ((uint32_t)buf[1] << 8) |
+           ((uint32_t)buf[2] << 16) | ((uint32_t)buf[3] << 24);
+}
+
+static int read_codename_index(void)
+{
+    char buf[32];
+    if (!read_smu_string("codename", buf, sizeof(buf))) return -1;
+    return atoi(buf);
+}
+
+static const char *map_codename(int idx)
+{
+    switch (idx) {
+    case 1:  return "Colfax";
+    case 2:  return "Renoir";
+    case 3:  return "Picasso";
+    case 4:  return "Matisse";
+    case 5:  return "Threadripper";
+    case 6:  return "Castle Peak";
+    case 7:  return "Raven Ridge";
+    case 8:  return "Raven Ridge 2";
+    case 9:  return "Summit Ridge";
+    case 10: return "Pinnacle Ridge";
+    case 11: return "Rembrandt";
+    case 12: return "Vermeer";
+    case 13: return "Vangogh";
+    case 14: return "Cezanne";
+    case 15: return "Milan";
+    case 16: return "Dali";
+    case 17: return "Lucienne";
+    case 18: return "Naples";
+    case 19: return "Chagall";
+    case 20: return "Raphael";
+    case 21: return "Phoenix";
+    case 22: return "Strix Point";
+    case 23: return "Granite Ridge";
+    case 24: return "Hawk Point";
+    case 25: return "Storm Peak";
+    default: return "Unknown";
+    }
+}
+
+/* ── dmidecode parsing ──────────────────────────────────────────────── */
+
+static void parse_dmidecode_processor(void)
+{
+    char *out = run_command("dmidecode -t processor 2>/dev/null");
+    if (!out) return;
+
+    int in_proc = 0;
+    char *line = strtok(out, "\n");
+    while (line) {
+        if (strstr(line, "Processor Information"))
+            in_proc = 1;
+        else if (in_proc && strstr(line, "Version:")) {
+            const char *colon = strchr(line, ':');
+            if (colon) {
+                colon++;
+                while (*colon == ' ') colon++;
+                snprintf(s_processor_name, STR_LEN, "%s", colon);
+            }
+            break;
+        }
+        line = strtok(NULL, "\n");
+    }
+    free(out);
+}
+
+static void parse_dmidecode_board(void)
+{
+    char *out = run_command("dmidecode -s baseboard-product-name 2>/dev/null");
+    if (out) { snprintf(s_board_product, STR_LEN, "%s", out); free(out); }
+    /* trim trailing newline */
+    char *nl = strchr(s_board_product, '\n');
+    if (nl) *nl = '\0';
+
+    out = run_command("dmidecode -s bios-version 2>/dev/null");
+    if (out) { snprintf(s_bios_version, STR_LEN, "%s", out); free(out); }
+    nl = strchr(s_bios_version, '\n');
+    if (nl) *nl = '\0';
+
+    out = run_command("dmidecode -s bios-release-date 2>/dev/null");
+    if (out) { snprintf(s_bios_date, STR_SHORT, "%s", out); free(out); }
+    nl = strchr(s_bios_date, '\n');
+    if (nl) *nl = '\0';
+}
+
+static uint64_t parse_capacity(const char *val)
+{
+    if (!val) return 0;
+    if (strstr(val, "No Module") || strstr(val, "Not Installed"))
+        return 0;
+    uint64_t size = 0;
+    char unit[16] = {0};
+    if (sscanf(val, "%lu %15s", &size, unit) < 2) return 0;
+    if (size > 0x100000) return 0; /* sanity: reject anything over ~1 TB */
+    /* upper-case unit */
+    for (char *p = unit; *p; p++) *p = (char)toupper((unsigned char)*p);
+    if (strcmp(unit, "GB") == 0 || strcmp(unit, "GIB") == 0)
+        return size * 1024ULL * 1024ULL * 1024ULL;
+    if (strcmp(unit, "MB") == 0 || strcmp(unit, "MIB") == 0)
+        return size * 1024ULL * 1024ULL;
+    if (strcmp(unit, "KB") == 0 || strcmp(unit, "KIB") == 0)
+        return size * 1024ULL;
+    return size;
+}
+
+static void build_module_display(memory_module_t *m, int index)
+{
+    /* slot label from bank locator */
+    int bank = -1;
+    char channel = 0;
+    if (sscanf(m->bank_label, "BANK %d", &bank) == 1 || sscanf(m->bank_label, "Bank %d", &bank) == 1) {
+        char ch = 'A' + (char)(bank / 2);
+        int num = (bank % 2) + 1;
+        snprintf(m->slot_label, sizeof(m->slot_label), "%c%d", ch, num);
+    } else if (sscanf(m->bank_label, "P0 CHANNEL %c", &channel) == 1 ||
+               sscanf(m->bank_label, "P0 Channel %c", &channel) == 1) {
+        /* e.g. "P0 CHANNEL A" + "DIMM 1" -> "A1" */
+        channel = (char)toupper((unsigned char)channel);
+        int dimm_num = 1;
+        sscanf(m->device_locator, "DIMM %d", &dimm_num);
+        snprintf(m->slot_label, sizeof(m->slot_label), "%c%d", channel, dimm_num);
+    } else if (m->device_locator[0]) {
+        snprintf(m->slot_label, sizeof(m->slot_label), "%.7s", m->device_locator);
+    } else if (m->bank_label[0]) {
+        snprintf(m->slot_label, sizeof(m->slot_label), "%.7s", m->bank_label);
+    } else {
+        snprintf(m->slot_label, sizeof(m->slot_label), "Slot %d", index);
+    }
+
+    double gib = (double)m->capacity_bytes / (1024.0 * 1024.0 * 1024.0);
+    snprintf(m->capacity_display, sizeof(m->capacity_display), "%.1f GiB", gib);
+    snprintf(m->slot_display, sizeof(m->slot_display), "Module %d: %s - %s", index + 1, m->slot_label, m->capacity_display);
+}
+
+static void parse_dmidecode_memory(void)
+{
+    /* dmidecode is often in /usr/sbin which may not be in PATH under pkexec */
+    const char *cmds[] = {
+        "/usr/sbin/dmidecode -t memory 2>/dev/null",
+        "/usr/bin/dmidecode -t memory 2>/dev/null",
+        "dmidecode -t memory 2>/dev/null",
+        NULL
+    };
+    char *out = NULL;
+    for (int ci = 0; cmds[ci]; ci++) {
+        out = run_command(cmds[ci]);
+        if (out && out[0]) break;
+        if (out) { free(out); out = NULL; }
+    }
+    if (!out) return;
+
+    /* Parse into a temporary list; only overwrite globals on success. */
+    memory_module_t tmp_modules[MAX_MODULES];
+    int tmp_count = 0;
+
+    memory_module_t cur;
+    memset(&cur, 0, sizeof(cur));
+    int in_device = 0;
+    uint64_t cap = 0;
+
+    char *line = strtok(out, "\n");
+    while (line) {
+        if (strstr(line, "Memory Device") && !strstr(line, "Mapped")) {
+            /* save previous */
+            if (in_device && cap > 0 && tmp_count < MAX_MODULES) {
+                cur.capacity_bytes = cap;
+                build_module_display(&cur, tmp_count);
+                tmp_modules[tmp_count++] = cur;
+            }
+            memset(&cur, 0, sizeof(cur));
+            cap = 0;
+            in_device = 1;
+            line = strtok(NULL, "\n");
+            continue;
+        }
+        if (!in_device) { line = strtok(NULL, "\n"); continue; }
+
+        /* trim leading whitespace */
+        const char *trimmed = line;
+        while (*trimmed == ' ' || *trimmed == '\t') trimmed++;
+        const char *colon = strchr(trimmed, ':');
+        if (!colon) { line = strtok(NULL, "\n"); continue; }
+
+        /* key/value */
+        int klen = (int)(colon - trimmed);
+        const char *val = colon + 1;
+        while (*val == ' ') val++;
+
+        if (klen == 4 && strncmp(trimmed, "Size", 4) == 0)
+            cap = parse_capacity(val);
+        else if (klen == 7 && strncmp(trimmed, "Locator", 7) == 0)
+            snprintf(cur.device_locator, STR_LEN, "%s", val);
+        else if (klen == 12 && strncmp(trimmed, "Bank Locator", 12) == 0)
+            snprintf(cur.bank_label, STR_LEN, "%s", val);
+        else if (klen == 12 && strncmp(trimmed, "Manufacturer", 12) == 0) {
+            if (strcmp(val, "Unknown") != 0 && strcmp(val, "Not Specified") != 0)
+                snprintf(cur.manufacturer, STR_LEN, "%s", val);
+        }
+        else if (klen == 11 && strncmp(trimmed, "Part Number", 11) == 0) {
+            if (strcmp(val, "Unknown") != 0 && strcmp(val, "NO DIMM") != 0 && strcmp(val, "Not Specified") != 0)
+                snprintf(cur.part_number, STR_LEN, "%s", val);
+        }
+        else if (klen == 13 && strncmp(trimmed, "Serial Number", 13) == 0) {
+            if (strcmp(val, "Unknown") != 0 && strcmp(val, "Not Specified") != 0 && strcmp(val, "00000000") != 0)
+                snprintf(cur.serial_number, STR_LEN, "%s", val);
+        }
+        else if (klen == 4 && strncmp(trimmed, "Rank", 4) == 0) {
+            int r = atoi(val);
+            cur.rank = (r == 4) ? RANK_QR : (r == 2) ? RANK_DR : RANK_SR;
+        }
+        else if (strstr(trimmed, "Configured Memory Speed") || strstr(trimmed, "Configured Clock Speed")) {
+            uint32_t mhz = 0;
+            sscanf(val, "%u", &mhz);
+            cur.clock_speed_mhz = mhz;
+        }
+        else if (klen == 4 && strncmp(trimmed, "Type", 4) == 0) {
+            /* Standard SMBIOS field — reliable on Intel and AMD boards alike,
+             * so this beats guessing DDR generation from an AMD SMU codename. */
+            if (strstr(val, "LPDDR5")) s_dmi_mem_type = MEM_LPDDR5;
+            else if (strstr(val, "LPDDR4")) s_dmi_mem_type = MEM_LPDDR4;
+            else if (strstr(val, "DDR5")) s_dmi_mem_type = MEM_DDR5;
+            else if (strstr(val, "DDR4")) s_dmi_mem_type = MEM_DDR4;
+        }
+
+        line = strtok(NULL, "\n");
+    }
+    /* last device */
+    if (in_device && cap > 0 && tmp_count < MAX_MODULES) {
+        cur.capacity_bytes = cap;
+        build_module_display(&cur, tmp_count);
+        tmp_modules[tmp_count++] = cur;
+    }
+    free(out);
+
+    if (tmp_count > 0) {
+        s_module_count = tmp_count;
+        memcpy(s_modules, tmp_modules, tmp_count * sizeof(memory_module_t));
+    }
+}
+
+/* ── AGESA version ──────────────────────────────────────────────────── */
+
+static int agesa_allowed(unsigned char c)
+{
+    return isalnum(c) || c == ' ' || c == '.' || c == '-';
+}
+
+static int find_agesa_in_buf(const uint8_t *buf, size_t len, char *out, size_t outsz)
+{
+    const char marker[] = "AGESA!V9";
+    size_t mlen = strlen(marker);
+    if (len < mlen) return 0;
+
+    for (size_t i = 0; i <= len - mlen; i++) {
+        if (memcmp(buf + i, marker, mlen) != 0) continue;
+        size_t start = i + mlen;
+        /* skip non-allowed */
+        while (start < len && !agesa_allowed(buf[start])) start++;
+        size_t end = start;
+        while (end < len && agesa_allowed(buf[end])) end++;
+        if (end > start) {
+            size_t n = end - start;
+            if (n >= outsz) n = outsz - 1;
+            memcpy(out, buf + start, n);
+            out[n] = '\0';
+            return 1;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+static void read_agesa_version(void)
+{
+    /* 1) /dev/mem BIOS region 0xE0000–0xFFFFF */
+    FILE *f = fopen("/dev/mem", "rb");
+    if (f) {
+        const long base = 0xE0000;
+        const int len = 0x100000 - 0xE0000;
+        uint8_t *buf = malloc(len);
+        if (buf) {
+            if (fseek(f, base, SEEK_SET) == 0) {
+                size_t rd = fread(buf, 1, len, f);
+                if (rd > 0 && find_agesa_in_buf(buf, rd, s_agesa_version, STR_LEN)) {
+                    free(buf);
+                    fclose(f);
+                    return;
+                }
+            }
+            free(buf);
+        }
+        fclose(f);
+    }
+
+    /* 2) ACPI tables */
+    const char *acpi_paths[] = {
+        "/sys/firmware/acpi/tables/DSDT",
+        "/sys/firmware/acpi/tables/FACP",
+        "/sys/firmware/acpi/tables/XSDT",
+        "/sys/firmware/acpi/tables/RSDT",
+        NULL
+    };
+    for (int i = 0; acpi_paths[i]; i++) {
+        FILE *af = fopen(acpi_paths[i], "rb");
+        if (!af) continue;
+        fseek(af, 0, SEEK_END);
+        long sz = ftell(af);
+        if (sz <= 0) { fclose(af); continue; }
+        rewind(af);
+        uint8_t *buf = malloc(sz);
+        if (!buf) { fclose(af); continue; }
+        size_t rd = fread(buf, 1, sz, af);
+        fclose(af);
+        if (rd > 0 && find_agesa_in_buf(buf, rd, s_agesa_version, STR_LEN)) {
+            free(buf);
+            return;
+        }
+        free(buf);
+    }
+
+    /* 3) dmidecode -t bios output (contains AGESA in BIOS version or ROM info) */
+    char *out = run_command("dmidecode -t bios 2>/dev/null");
+    if (out) {
+        if (find_agesa_in_buf((const uint8_t *)out, strlen(out), s_agesa_version, STR_LEN)) {
+            free(out);
+            return;
+        }
+        free(out);
+    }
+
+    /* 4) Scan entire SMBIOS/DMI raw blob */
+    const char *dmi_paths[] = {
+        "/sys/firmware/dmi/tables/DMI",
+        "/sys/firmware/dmi/tables/smbios_entry_point",
+        NULL
+    };
+    for (int i = 0; dmi_paths[i]; i++) {
+        FILE *df = fopen(dmi_paths[i], "rb");
+        if (!df) continue;
+        fseek(df, 0, SEEK_END);
+        long sz = ftell(df);
+        if (sz <= 0) { fclose(df); continue; }
+        rewind(df);
+        uint8_t *buf = malloc(sz);
+        if (!buf) { fclose(df); continue; }
+        size_t rd = fread(buf, 1, sz, df);
+        fclose(df);
+        if (rd > 0 && find_agesa_in_buf(buf, rd, s_agesa_version, STR_LEN)) {
+            free(buf);
+            return;
+        }
+        free(buf);
+    }
+}
+
+/* ── Total memory from /proc/meminfo ────────────────────────────────── */
+
+static void read_total_memory(char *buf, size_t sz)
+{
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (!f) { buf[0] = '\0'; return; }
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        uint64_t kb = 0;
+        if (sscanf(line, "MemTotal: %lu kB", &kb) == 1) {
+            double gib = (double)kb / 1024.0 / 1024.0;
+            snprintf(buf, sz, "%.1f GiB", gib);
+            fclose(f);
+            return;
+        }
+    }
+    fclose(f);
+    buf[0] = '\0';
+}
+
+/* ── Memory type from codename ──────────────────────────────────────── */
+
+static mem_type_t mem_type_for_codename(int idx)
+{
+    switch (idx) {
+    case 23: return MEM_DDR5;
+    case 4: case 9: case 10: case 12: case 18: case 19:
+        return MEM_DDR4;
+    default: return MEM_UNKNOWN;
+    }
+}
+
+/* ── hwmon helpers ──────────────────────────────────────────────────── */
+
+/* Find a hwmon directory by name match. Returns path in buf or empty. */
+static int find_hwmon_by_name(const char *match, char *buf, size_t sz)
+{
+    DIR *d = opendir("/sys/class/hwmon");
+    if (!d) return 0;
+    struct dirent *ent;
+    while ((ent = readdir(d))) {
+        if (ent->d_name[0] == '.') continue;
+        char namepath[512];
+        snprintf(namepath, sizeof(namepath), "/sys/class/hwmon/%s/name", ent->d_name);
+        char name[64];
+        if (!read_file_string(namepath, name, sizeof(name))) continue;
+        /* case-insensitive contains */
+        char name_lower[64];
+        int nli = 0;
+        for (; name[nli] && nli < 63; nli++)
+            name_lower[nli] = (char)tolower((unsigned char)name[nli]);
+        name_lower[nli] = '\0';
+        if (strstr(name_lower, match)) {
+            snprintf(buf, sz, "/sys/class/hwmon/%s", ent->d_name);
+            closedir(d);
+            return 1;
+        }
+    }
+    closedir(d);
+    return 0;
+}
+
+static float read_temp_input(const char *hwmon_dir, int index)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/temp%d_input", hwmon_dir, index);
+    int raw = read_int_file(path);
+    if (raw == 0) return -1.0f;
+    float c = raw / 1000.0f;
+    return (c >= 0.0f && c <= 150.0f) ? c : -1.0f;
+}
+
+/* ── k10temp Tctl/Tccd overlay ──────────────────────────────────────── */
+
+static void apply_k10temp_tctl_tccd(smu_metrics_t *m)
+{
+    char k10dir[640];
+    if (find_hwmon_by_name("k10temp", k10dir, sizeof(k10dir))) {
+        float tctl = read_temp_input(k10dir, 1);
+        float tccd1 = read_temp_input(k10dir, 3);
+        float tccd2 = read_temp_input(k10dir, 4);
+        if (tctl >= 0) { m->tctl_c = tctl; m->has_tctl = true; }
+        if (tccd1 >= 0) { m->tccd1_c = tccd1; m->has_tccd1 = true; }
+        if (tccd2 >= 0) { m->tccd2_c = tccd2; m->has_tccd2 = true; }
+
+        /* Derive Tdie from Tctl if PM table didn't provide it */
+        if (!m->has_tdie && m->has_tctl) {
+            m->tdie_c = m->tctl_c;
+            m->has_tdie = true;
+        }
+        return;
+    }
+
+    /* Fallback: zenpower Tdie/Tctl/Tccd1 from labels */
+    char zpdir[640];
+    if (!find_hwmon_by_name("zenpower", zpdir, sizeof(zpdir))) return;
+
+    DIR *d = opendir(zpdir);
+    if (!d) return;
+    struct dirent *ent;
+    while ((ent = readdir(d))) {
+        if (strncmp(ent->d_name, "temp", 4) != 0 || !strstr(ent->d_name, "_label"))
+            continue;
+        int idx = 0;
+        if (sscanf(ent->d_name, "temp%d_label", &idx) != 1) continue;
+        char lpath[640], label[64];
+        snprintf(lpath, sizeof(lpath), "%s/temp%d_label", zpdir, idx);
+        if (!read_file_string(lpath, label, sizeof(label))) continue;
+        float c = read_temp_input(zpdir, idx);
+        if (c < 0) continue;
+        /* case insensitive match */
+        char lower[64];
+        int li = 0;
+        for (; label[li] && li < 63; li++)
+            lower[li] = (char)tolower((unsigned char)label[li]);
+        lower[li] = '\0';
+        if (strstr(lower, "tdie")) { m->tdie_c = c; m->has_tdie = true; }
+        else if (strstr(lower, "tctl")) { m->tctl_c = c; m->has_tctl = true; }
+        else if (strstr(lower, "tccd1")) { m->tccd1_c = c; m->has_tccd1 = true; }
+        else if (strstr(lower, "tccd2")) { m->tccd2_c = c; m->has_tccd2 = true; }
+    }
+    closedir(d);
+
+    if (!m->has_tdie && m->has_tctl) {
+        m->tdie_c = m->tctl_c;
+        m->has_tdie = true;
+    }
+    if (!m->has_tdie && m->cpu_temp_c > 0) {
+        m->tdie_c = m->cpu_temp_c;
+        m->has_tdie = true;
+    }
+}
+
+/* ── Per-core temps from hwmon "Core N" labels ──────────────────────── */
+
+static void apply_per_core_temps_hwmon(smu_metrics_t *m)
+{
+    DIR *hwmon = opendir("/sys/class/hwmon");
+    if (!hwmon) return;
+    struct dirent *ent;
+    while ((ent = readdir(hwmon))) {
+        if (ent->d_name[0] == '.') continue;
+        char dir[640];
+        snprintf(dir, sizeof(dir), "/sys/class/hwmon/%s", ent->d_name);
+
+        DIR *d2 = opendir(dir);
+        if (!d2) continue;
+        struct dirent *e2;
+        while ((e2 = readdir(d2))) {
+            if (strncmp(e2->d_name, "temp", 4) != 0 || !strstr(e2->d_name, "_label"))
+                continue;
+            int idx = 0;
+            if (sscanf(e2->d_name, "temp%d_label", &idx) != 1) continue;
+            char lpath[640], label[64];
+            snprintf(lpath, sizeof(lpath), "%s/temp%d_label", dir, idx);
+            if (!read_file_string(lpath, label, sizeof(label))) continue;
+            if (strncmp(label, "Core ", 5) != 0) continue;
+            int core = atoi(label + 5);
+            if (core < 0 || core >= MAX_CORES) continue;
+            float c = read_temp_input(dir, idx);
+            if (c >= 0) {
+                m->core_temps_c[core] = c;
+                if (core >= m->core_temps_count)
+                    m->core_temps_count = core + 1;
+            }
+        }
+        closedir(d2);
+    }
+    closedir(hwmon);
+}
+
+/* ── SPD5118 DIMM temps ─────────────────────────────────────────────── */
+
+static void read_spd_temps(smu_metrics_t *m)
+{
+    /* Try hwmon entries named spd5118 */
+    DIR *hwmon = opendir("/sys/class/hwmon");
+    if (!hwmon) return;
+    struct dirent *ent;
+    m->spd_temps_count = 0;
+    while ((ent = readdir(hwmon)) && m->spd_temps_count < MAX_MODULES) {
+        if (ent->d_name[0] == '.') continue;
+        char namepath[640], name[64];
+        snprintf(namepath, sizeof(namepath), "/sys/class/hwmon/%s/name", ent->d_name);
+        if (!read_file_string(namepath, name, sizeof(name))) continue;
+        char lower[64];
+        int li = 0;
+        for (; name[li] && li < 63; li++)
+            lower[li] = (char)tolower((unsigned char)name[li]);
+        lower[li] = '\0';
+        if (!strstr(lower, "spd5118")) continue;
+
+        char tpath[640];
+        snprintf(tpath, sizeof(tpath), "/sys/class/hwmon/%s/temp1_input", ent->d_name);
+        int raw = read_int_file(tpath);
+        if (raw == 0) continue;
+        float c = raw / 1000.0f;
+        if (c >= 0.0f && c <= 150.0f)
+            m->spd_temps_c[m->spd_temps_count++] = c;
+    }
+    closedir(hwmon);
+}
+
+/* ── Fan speeds (Nuvoton nct6xxx) ───────────────────────────────────── */
+
+static void read_fans(fan_reading_t *fans, int *count)
+{
+    *count = 0;
+    DIR *hwmon = opendir("/sys/class/hwmon");
+    if (!hwmon) return;
+    struct dirent *ent;
+    while ((ent = readdir(hwmon))) {
+        if (ent->d_name[0] == '.') continue;
+        char namepath[640], name[64];
+        snprintf(namepath, sizeof(namepath), "/sys/class/hwmon/%s/name", ent->d_name);
+        if (!read_file_string(namepath, name, sizeof(name))) continue;
+        char lower[64];
+        int li = 0;
+        for (; name[li] && li < 63; li++)
+            lower[li] = (char)tolower((unsigned char)name[li]);
+        lower[li] = '\0';
+        if (strncmp(lower, "nct6", 4) != 0 && !strstr(lower, "nuvoton"))
+            continue;
+
+        char dir[640];
+        snprintf(dir, sizeof(dir), "/sys/class/hwmon/%s", ent->d_name);
+        int found_any = 0;
+        for (int i = 1; i <= 7 && *count < MAX_FANS; i++) {
+            char path[640];
+            snprintf(path, sizeof(path), "%s/fan%d_input", dir, i);
+            int rpm = read_int_file(path);
+            if (rpm <= 0) continue;
+            fan_reading_t *fan = &fans[(*count)++];
+            if (i == 7)
+                snprintf(fan->label, sizeof(fan->label), "Pump");
+            else
+                snprintf(fan->label, sizeof(fan->label), "Fan%d", i);
+            fan->rpm = rpm;
+            found_any = 1;
+        }
+        if (found_any) break;
+    }
+    closedir(hwmon);
+}
+
+/* ── /proc/stat per-core usage ──────────────────────────────────────── */
+
+static void read_core_usage(smu_metrics_t *m)
+{
+    FILE *f = fopen("/proc/stat", "r");
+    if (!f) return;
+
+    float logical_usage[MAX_LOGICAL_CPUS];
+    int logical_count = 0;
+    memset(logical_usage, 0, sizeof(logical_usage));
+
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "cpu", 3) != 0 || !isdigit((unsigned char)line[3]))
+            continue;
+        int cpuid = 0;
+        uint64_t user, nice, sys, idle, iowait, irq, softirq, steal, guest, gnice;
+        user = nice = sys = idle = iowait = irq = softirq = steal = guest = gnice = 0;
+        if (sscanf(line, "cpu%d %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu",
+                   &cpuid, &user, &nice, &sys, &idle, &iowait, &irq, &softirq,
+                   &steal, &guest, &gnice) < 5)
+            continue;
+        if (cpuid < 0 || cpuid >= MAX_LOGICAL_CPUS) continue;
+
+        uint64_t idle_all = idle + iowait;
+        uint64_t total = user + nice + sys + idle + iowait + irq + softirq + steal + guest + gnice;
+        if (total == 0) continue;
+
+        float usage = 0;
+        if (s_prev_valid[cpuid]) {
+            uint64_t di = idle_all - s_prev_idle[cpuid];
+            uint64_t dt = total - s_prev_total[cpuid];
+            if (dt > 0) {
+                usage = (1.0f - (float)di / (float)dt) * 100.0f;
+                if (usage < 0) usage = 0;
+                if (usage > 100) usage = 100;
+            }
+        }
+        s_prev_idle[cpuid] = idle_all;
+        s_prev_total[cpuid] = total;
+        s_prev_valid[cpuid] = 1;
+
+        if (cpuid < MAX_LOGICAL_CPUS) {
+            logical_usage[cpuid] = usage;
+            if (cpuid >= logical_count) logical_count = cpuid + 1;
+        }
+    }
+    fclose(f);
+
+    /* Aggregate SMT pairs: core N = avg(cpu 2N, cpu 2N+1) */
+    int max_core = (logical_count + 1) / 2;
+    if (max_core > MAX_CORES) max_core = MAX_CORES;
+    for (int c = 0; c < max_core; c++) {
+        int l0 = c * 2, l1 = c * 2 + 1;
+        float sum = 0; int cnt = 0;
+        if (l0 < logical_count) { sum += logical_usage[l0]; cnt++; }
+        if (l1 < logical_count) { sum += logical_usage[l1]; cnt++; }
+        m->core_usage_pct[c] = cnt > 0 ? sum / cnt : 0;
+    }
+    m->core_usage_count = max_core;
+}
+
+/* ── Package power via Intel RAPL (generic powercap sysfs, no root needed
+ * to read energy_uj on most kernels) — the AMD-equivalent "PPT" number for
+ * platforms with no SMU PM table to read it from. ── */
+
+static float read_rapl_package_power_w(void)
+{
+    static uint64_t s_prev_uj = 0;
+    static struct timespec s_prev_ts;
+    static int s_have_prev = 0;
+
+    FILE *f = fopen("/sys/class/powercap/intel-rapl:0/energy_uj", "r");
+    if (!f) return 0.0f;
+    uint64_t uj = 0;
+    int ok = fscanf(f, "%lu", &uj) == 1;
+    fclose(f);
+    if (!ok) return 0.0f;
+
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+
+    float watts = 0.0f;
+    if (s_have_prev && uj >= s_prev_uj) {
+        double dt = (double)(now.tv_sec - s_prev_ts.tv_sec) +
+                    (double)(now.tv_nsec - s_prev_ts.tv_nsec) / 1e9;
+        if (dt > 0.05) watts = (float)((double)(uj - s_prev_uj) / 1e6 / dt);
+    }
+    s_prev_uj = uj;
+    s_prev_ts = now;
+    s_have_prev = 1;
+    return watts;
+}
+
+/* ── Per-core frequency from cpufreq ────────────────────────────────── */
+
+static void read_core_freq(smu_metrics_t *m)
+{
+    float logical_freq[MAX_LOGICAL_CPUS];
+    int logical_count = 0;
+    memset(logical_freq, 0, sizeof(logical_freq));
+
+    for (int i = 0; i < MAX_LOGICAL_CPUS; i++) {
+        char path[256];
+        snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq", i);
+        int khz = read_int_file(path);
+        if (khz <= 0) {
+            if (i > 0) break;
+            continue;
+        }
+        logical_freq[i] = khz / 1000.0f;
+        if (i >= logical_count) logical_count = i + 1;
+    }
+
+    int max_core = (logical_count + 1) / 2;
+    if (max_core > MAX_CORES) max_core = MAX_CORES;
+    for (int c = 0; c < max_core; c++) {
+        int l0 = c * 2, l1 = c * 2 + 1;
+        float sum = 0; int cnt = 0;
+        if (l0 < logical_count && logical_freq[l0] > 0) { sum += logical_freq[l0]; cnt++; }
+        if (l1 < logical_count && logical_freq[l1] > 0) { sum += logical_freq[l1]; cnt++; }
+        m->core_freq_mhz[c] = cnt > 0 ? sum / cnt : 0;
+    }
+    m->core_freq_count = max_core;
+}
+
+/* ── BCLK from DMI Type 4 (External Clock field) ───────────────────── */
+
+static float try_read_bclk_dmi(void)
+{
+    /*
+     * DMI Type 4 (Processor Information), offset 0x12: External Clock (MHz, WORD).
+     * This is the BIOS-reported BCLK — exact integer, same source CPU-X uses.
+     * Requires root (binary runs via pkexec).
+     */
+    int fd = open("/sys/firmware/dmi/tables/DMI", O_RDONLY);
+    if (fd < 0) return 0;
+
+    uint8_t buf[65536];
+    ssize_t total = 0, n;
+    while (total < (ssize_t)sizeof(buf) &&
+           (n = read(fd, buf + total, sizeof(buf) - total)) > 0)
+        total += n;
+    close(fd);
+    if (total < 4) return 0;
+
+    int i = 0;
+    while (i < total - 4) {
+        uint8_t type = buf[i];
+        uint8_t len  = buf[i + 1];
+        if (i + len > total) break;
+        if (type == 127) break; /* end-of-table */
+
+        if (type == 4 && len >= 0x14) {
+            uint16_t ext_clk;
+            memcpy(&ext_clk, buf + i + 0x12, sizeof(ext_clk));
+            if (ext_clk >= 80 && ext_clk <= 200)
+                return (float)ext_clk;
+        }
+
+        /* advance past fixed part + string table (ends with double NUL) */
+        int end = i + len;
+        while (end < total - 1 && !(buf[end] == 0 && buf[end + 1] == 0))
+            end++;
+        i = end + 2;
+    }
+    return 0;
+}
+
+/* ── BCLK from MSR ──────────────────────────────────────────────────── */
+
+static int read_p0_msr_fields(uint64_t *cpuFid_out, uint64_t *cpuDfsId_out)
+{
+    /*
+     * CONFIG_X86_MSR=y — the device is always present without modprobe.
+     * Use pread directly with the MSR address as the file offset.
+     */
+    int fd = open("/dev/cpu/0/msr", O_RDONLY);
+    if (fd < 0) return 0;
+    uint64_t val = 0;
+    ssize_t n = pread(fd, &val, sizeof(val), (off_t)0xC0010064);
+    close(fd);
+    if (n != (ssize_t)sizeof(val)) return 0;
+
+    *cpuFid_out   = val & 0xFF;
+    *cpuDfsId_out = (val >> 8) & 0x3F;
+    return 1;
+}
+
+/* Read physical core count from CPU topology.
+ * Count unique (physical_package_id, core_id) pairs across all logical CPUs.
+ * This correctly handles multi-CCD systems where core_id is per-CCD. */
+static int read_physical_core_count(void)
+{
+    long max_cpu = sysconf(_SC_NPROCESSORS_CONF);
+    if (max_cpu <= 0) max_cpu = 256;
+
+    /* Dedup: key = (pkg_id << 16) | core_id — one entry per physical core */
+    uint32_t seen[256];
+    int nseen = 0;
+
+    for (int cpu = 0; cpu < max_cpu; cpu++) {
+        char path[256];
+        int pkg_id = -1, core_id = -1;
+
+        snprintf(path, sizeof(path),
+                 "/sys/devices/system/cpu/cpu%d/topology/physical_package_id", cpu);
+        FILE *f = fopen(path, "r");
+        if (f) { if (fscanf(f, "%d", &pkg_id) != 1) pkg_id = -1; fclose(f); }
+
+        snprintf(path, sizeof(path),
+                 "/sys/devices/system/cpu/cpu%d/topology/core_id", cpu);
+        f = fopen(path, "r");
+        if (f) { if (fscanf(f, "%d", &core_id) != 1) core_id = -1; fclose(f); }
+
+        if (pkg_id < 0 || core_id < 0) continue;
+
+        uint32_t key = ((uint32_t)pkg_id << 16) | (uint32_t)core_id;
+        int dup = 0;
+        for (int i = 0; i < nseen; i++) {
+            if (seen[i] == key) { dup = 1; break; }
+        }
+        if (!dup && nseen < 256) seen[nseen++] = key;
+    }
+
+    return nseen > 0 ? nseen : -1;
+}
+
+static int read_cpu_family(void)
+{
+    FILE *f = fopen("/proc/cpuinfo", "r");
+    if (!f) return -1;
+    char line[128];
+    int family = -1;
+    while (fgets(line, sizeof(line), f)) {
+        if (sscanf(line, "cpu family : %d", &family) == 1)
+            break;
+    }
+    fclose(f);
+    return family;
+}
+
+static float try_read_bclk(void)
+{
+    /*
+     * AMD Zen BCLK derivation via MSR 0xC0010064 (P-state 0):
+     *   bits [7:0]  = CpuFid
+     *   bits [13:8] = CpuDfsId
+     *
+     * Zen1–4 (family 0x17, 0x19): CoreCOF = 200 * CpuFid / CpuDfsId
+     *   → P0 multiplier = 2 * CpuFid / CpuDfsId
+     * Zen5   (family 0x1A):       CoreCOF = 100 * CpuFid / CpuDfsId
+     *   → P0 multiplier = CpuFid / CpuDfsId
+     *
+     * BCLK = cpuinfo_max_freq / p0_mult
+     */
+    uint64_t cpuFid = 0, cpuDfsId = 0;
+    if (!read_p0_msr_fields(&cpuFid, &cpuDfsId)) return 0;
+    if (cpuDfsId == 0 || cpuFid == 0) return 0;
+
+    int family = read_cpu_family();
+    double mult_factor = (family == 0x1A) ? 1.0 : 2.0;
+    double p0_mult = ((double)cpuFid / (double)cpuDfsId) * mult_factor;
+    if (p0_mult <= 0.1 || p0_mult > 200.0) return 0;
+
+    /* Stable reference: kernel-reported max boost frequency */
+    float ref_mhz = 0;
+    const char *freq_files[] = {
+        "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq",
+        "/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq",
+        "/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq",
+        NULL
+    };
+    for (int i = 0; freq_files[i]; i++) {
+        int khz = read_int_file(freq_files[i]);
+        if (khz > 0) { ref_mhz = khz / 1000.0f; break; }
+    }
+    if (ref_mhz <= 0) return 0;
+
+    float bclk = (float)ref_mhz / (float)p0_mult;
+    return (bclk >= 80.0f && bclk <= 120.0f) ? bclk : 0;
+}
+
+/* ── Read PM table binary ───────────────────────────────────────────── */
+
+static int read_pm_table_raw(float **out_floats, int *out_count)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/pm_table", SMU_PATH);
+
+    FILE *f = fopen(path, "rb");
+    if (!f) { *out_floats = NULL; *out_count = 0; return 0; }
+
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    if (sz < 4) { fclose(f); *out_floats = NULL; *out_count = 0; return 0; }
+    rewind(f);
+
+    uint8_t *raw = malloc(sz);
+    if (!raw) { fclose(f); *out_floats = NULL; *out_count = 0; return 0; }
+    size_t rd = fread(raw, 1, sz, f);
+    fclose(f);
+    if ((int)rd < 4) { free(raw); *out_floats = NULL; *out_count = 0; return 0; }
+
+    int count = (int)rd / 4;
+    float *floats = malloc(count * sizeof(float));
+    if (!floats) { free(raw); *out_floats = NULL; *out_count = 0; return 0; }
+    memcpy(floats, raw, count * sizeof(float));
+    free(raw);
+
+    *out_floats = floats;
+    *out_count = count;
+    return 1;
+}
+
+
+/* ── Public API ─────────────────────────────────────────────────────── */
+
+int backend_is_supported(void)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/version", SMU_PATH);
+    /* access(R_OK), not file_exists()/stat(): the ryzen_smu sysfs nodes are
+     * root-only (0600), and stat() only needs directory search permission —
+     * it succeeds for any user even though opening the file for read (what
+     * every actual SMU/SMN read below does) then fails silently and returns
+     * 0. That previously made this report "supported" for a non-root daemon,
+     * so the UI took the real-data branch and showed a wall of zeros instead
+     * of the honest "run as root" fallback. */
+    if (access(path, R_OK) == 0) return 1;
+
+    /* Module may have been unloaded — try loading it now */
+    const char *mp = access("/usr/bin/modprobe", X_OK) == 0 ? "/usr/bin/modprobe" :
+                     access("/sbin/modprobe",    X_OK) == 0 ? "/sbin/modprobe"    :
+                                                               "modprobe";
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "%s ryzen_smu 2>/dev/null", mp);
+    run_shell(cmd);
+    return access(path, R_OK) == 0;
+}
+
+void backend_read_summary(system_summary_t *out)
+{
+    memset(out, 0, sizeof(*out));
+
+    /* Load kernel modules and cache static data on first call */
+    if (!s_cached_static) {
+        /* Use absolute path — pkexec strips PATH */
+        const char *mp = access("/usr/bin/modprobe", X_OK) == 0 ? "/usr/bin/modprobe" :
+                         access("/sbin/modprobe",    X_OK) == 0 ? "/sbin/modprobe"    :
+                                                                   "modprobe";
+        char cmd[256];
+
+        /* Also attempts to modprobe ryzen_smu — a no-op that fails quietly
+         * on any non-AMD box. */
+        s_smu_ok = backend_is_supported();
+
+        if (s_smu_ok) {
+            snprintf(cmd, sizeof(cmd), "%s msr 2>/dev/null", mp);
+            run_shell(cmd);
+
+            /* Load aod_voltages — kernel module auto-detects offsets via SMU codename */
+            if (!file_exists("/sys/kernel/aod_voltages/mem_vddio")) {
+                snprintf(cmd, sizeof(cmd), "%s aod_voltages 2>/dev/null", mp);
+                run_shell(cmd);
+            }
+            /* Always unload on exit — these modules are only useful while the app runs */
+            if (file_exists("/sys/kernel/aod_voltages/mem_vddio"))
+                s_loaded_aod_voltages = 1;
+            if (file_exists("/sys/kernel/ryzen_smu_drv/version"))
+                s_loaded_ryzen_smu = 1;
+        }
+
+        if (access("/sys/module/tuxbench", F_OK) != 0) {
+            snprintf(cmd, sizeof(cmd), "%s tuxbench 2>/dev/null", mp);
+            run_shell(cmd);
+        }
+        if (access("/sys/module/tuxbench", F_OK) == 0)
+            s_loaded_tuxbench = 1;
+
+        /* Load nct6775 if no Nuvoton hwmon driver is active.
+         * Covers NCT6775F/6776F/6779D/6791D/6792D/6793D/
+         *        6795D/6796D/6797D/6798D/6799D — no-op if hardware absent.
+         * A generic Super I/O chip, unrelated to CPU vendor. */
+        {
+            char hwmon_path[640];
+            if (!find_hwmon_by_name("nct6", hwmon_path, sizeof(hwmon_path))) {
+                snprintf(cmd, sizeof(cmd), "%s nct6775 2>/dev/null", mp);
+                run_shell(cmd);
+            }
+        }
+
+        parse_dmidecode_processor();
+        parse_dmidecode_board();
+        parse_dmidecode_memory();
+        if (s_smu_ok) read_agesa_version(); /* AMD-only firmware marker */
+        s_physical_cores = read_physical_core_count();
+        s_cached_static = 1;
+    }
+
+    out->smu_supported = s_smu_ok;
+
+    /* CPU info */
+    int codename_idx = s_smu_ok ? read_codename_index() : -1;
+    snprintf(out->cpu.name, STR_LEN, "%s", s_smu_ok ? "AMD Ryzen (from ryzen_smu)" : s_processor_name);
+    snprintf(out->cpu.processor_name, STR_LEN, "%s", s_processor_name);
+    if (s_smu_ok) snprintf(out->cpu.codename, STR_SHORT, "%s", map_codename(codename_idx));
+
+    uint32_t pm_ver = 0;
+    if (s_smu_ok) {
+        read_smu_string("version", out->cpu.smu_version, STR_SHORT);
+        pm_ver = read_smu_uint32("pm_table_version");
+        if (pm_ver)
+            snprintf(out->cpu.pm_table_version, STR_SHORT, "PM table 0x%08X", pm_ver);
+    }
+
+    /* Board info */
+    snprintf(out->board.motherboard, STR_LEN, "%s", s_board_product);
+    snprintf(out->board.bios_version, STR_LEN, "%s", s_bios_version);
+    snprintf(out->board.bios_date, STR_SHORT, "%s", s_bios_date);
+    snprintf(out->board.agesa_version, STR_LEN, "%s", s_agesa_version);
+    snprintf(out->board.display_line, sizeof(out->board.display_line),
+             "%s | BIOS %s (%s) | AGESA %s",
+             s_board_product, s_bios_version, s_bios_date,
+             s_agesa_version[0] ? s_agesa_version : "N/A");
+
+    /* Modules (cached) */
+    out->module_count = s_module_count;
+    memcpy(out->modules, s_modules, s_module_count * sizeof(memory_module_t));
+
+    /* PM table → metrics (AMD SMU only) */
+    if (s_smu_ok) {
+        float *pm_floats = NULL;
+        int pm_count = 0;
+        if (read_pm_table_raw(&pm_floats, &pm_count)) {
+            pm_table_read(pm_ver, pm_floats, pm_count, s_physical_cores, &out->metrics);
+            free(pm_floats);
+        }
+    }
+
+    /* BCLK: DMI External Clock is standard SMBIOS, real on any vendor; the
+     * MSR 0xC0010064 fallback decodes AMD's P-state encoding specifically. */
+    out->metrics.bclk_mhz = try_read_bclk_dmi();
+    if (out->metrics.bclk_mhz <= 0.0f && s_smu_ok)
+        out->metrics.bclk_mhz = try_read_bclk();
+
+    /* Memory voltages from aod_voltages kernel module sysfs (AMD only —
+     * the module is never loaded when !s_smu_ok, so these stay absent). */
+    if (s_smu_ok) {
+        int mv;
+        mv = read_int_file("/sys/kernel/aod_voltages/mem_vddio");
+        if (mv > 500 && mv < 3000) out->metrics.mem_vdd    = mv / 1000.0f;
+        mv = read_int_file("/sys/kernel/aod_voltages/mem_vddq");
+        if (mv > 500 && mv < 3000) out->metrics.mem_vddq   = mv / 1000.0f;
+        mv = read_int_file("/sys/kernel/aod_voltages/mem_vpp");
+        if (mv > 500 && mv < 3000) out->metrics.mem_vpp    = mv / 1000.0f;
+        mv = read_int_file("/sys/kernel/aod_voltages/cpu_vddio");
+        if (mv > 500 && mv < 3000) out->metrics.cpu_vddio  = mv / 1000.0f;
+    }
+
+    /* hwmon overlays — Core-N labels (coretemp/k10temp/zenpower all use
+     * them) and spd5118 are generic; k10temp Tctl/Tccd is AMD-specific but
+     * a no-op no-crash when that chip doesn't exist. */
+    apply_per_core_temps_hwmon(&out->metrics);
+    apply_k10temp_tctl_tccd(&out->metrics);
+    read_spd_temps(&out->metrics);
+
+    /* Per-core usage and frequency: /proc/stat + cpufreq, any vendor. */
+    read_core_usage(&out->metrics);
+    read_core_freq(&out->metrics);
+
+    /* Package power: AMD PM table already filled this above; RAPL covers
+     * Intel (and any AMD box booted without ryzen_smu access). */
+    if (out->metrics.package_power_w <= 0.0f)
+        out->metrics.package_power_w = read_rapl_package_power_w();
+
+    /* DRAM JEDEC sub-timings: read via AMD SMN, keyed by SMU codename — no
+     * portable equivalent (Intel's would be per-generation MCHBAR registers). */
+    if (s_smu_ok) dram_read_timings(codename_idx, &out->dram);
+
+    /* Memory config: SMBIOS "Type:" is authoritative on any vendor; the
+     * AMD codename table is only a fallback for older dmidecode/BIOS that
+     * omit it. */
+    out->memory.type = (s_dmi_mem_type != MEM_UNKNOWN) ? s_dmi_mem_type
+                                                        : mem_type_for_codename(codename_idx);
+    float mem_freq = out->dram.frequency_hint_mhz;
+
+    /* dmidecode "Configured Memory Speed" (MT/s) */
+    uint32_t max_cfg = 0;
+    for (int i = 0; i < s_module_count; i++) {
+        if (s_modules[i].clock_speed_mhz > max_cfg)
+            max_cfg = s_modules[i].clock_speed_mhz;
+    }
+    if (out->memory.type == MEM_DDR4) {
+        /* For DDR4, prefer SMN-derived effective MT/s; fall back to dmidecode. */
+        if (mem_freq <= 0.0f && max_cfg > 0)
+            mem_freq = (float)max_cfg;
+    } else {
+        /* Non-DDR4: prefer timing-derived hint, else fall back to MCLK MHz. */
+        if (mem_freq == 0 && out->metrics.mclk_mhz > 0)
+            mem_freq = out->metrics.mclk_mhz;
+        else if (mem_freq <= 0.0f && max_cfg > 0)
+            mem_freq = (float)max_cfg;
+    }
+    out->memory.frequency = mem_freq;
+    read_total_memory(out->memory.total_capacity, sizeof(out->memory.total_capacity));
+
+    /* Build part number string from unique module part numbers */
+    char *pn_buf = out->memory.part_number;
+    pn_buf[0] = '\0';
+    for (int i = 0; i < s_module_count; i++) {
+        if (s_modules[i].part_number[0] == '\0') continue;
+        /* check duplicate */
+        if (strstr(pn_buf, s_modules[i].part_number)) continue;
+        if (pn_buf[0] != '\0') strncat(pn_buf, ", ", STR_LEN - strlen(pn_buf) - 1);
+        strncat(pn_buf, s_modules[i].part_number, STR_LEN - strlen(pn_buf) - 1);
+    }
+
+    /* Fans */
+    read_fans(out->fans, &out->fan_count);
+}
+
+static void rmmod_module(const char *rm, const char *module)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) { dup2(devnull, STDERR_FILENO); close(devnull); }
+        execl(rm, rm, module, (char *)NULL);
+        _exit(1);
+    } else if (pid > 0) {
+        waitpid(pid, NULL, 0);
+    }
+}
+
+void backend_cleanup(void)
+{
+    const char *rm = access("/usr/bin/rmmod", X_OK) == 0 ? "/usr/bin/rmmod" :
+                     access("/sbin/rmmod",    X_OK) == 0 ? "/sbin/rmmod"    :
+                                                           "/usr/bin/rmmod";
+
+    /* Use fork+execl: safe from both normal exit and signal handlers.
+     * system()/popen() are not async-signal-safe and silently fail in signals. */
+    if (s_loaded_aod_voltages) {
+        s_loaded_aod_voltages = 0;
+        rmmod_module(rm, "aod_voltages");
+    }
+    if (s_loaded_ryzen_smu) {
+        s_loaded_ryzen_smu = 0;
+        rmmod_module(rm, "ryzen_smu");
+    }
+    if (s_loaded_tuxbench) {
+        s_loaded_tuxbench = 0;
+        rmmod_module(rm, "tuxbench");
+    }
+}
+
+/* ── Debug dump ─────────────────────────────────────────────────────── */
+
+char *backend_read_debug_dump(void)
+{
+    /* Allocate a large enough buffer (PM table can be ~2000 entries * ~20 chars) */
+    size_t cap = 256 * 1024;
+    char *buf = malloc(cap);
+    if (!buf) return NULL;
+    size_t off = 0;
+
+#define DUMP(fmt, ...) \
+    do { off += (size_t)snprintf(buf + off, cap - off, fmt, ##__VA_ARGS__); } while (0)
+
+    /* ── SMU sysfs values ─────────────────────────────────────────── */
+    DUMP("=== SMU Info ===\n");
+    {
+        char tmp[256];
+        if (read_smu_string("version", tmp, sizeof(tmp)))
+            DUMP("SMU Version:        %s\n", tmp);
+        if (read_smu_string("codename", tmp, sizeof(tmp)))
+            DUMP("Codename:           %s\n", tmp);
+        if (read_smu_string("mp1_if_version", tmp, sizeof(tmp)))
+            DUMP("MP1 IF Version:     %s\n", tmp);
+        uint32_t pm_ver = read_smu_uint32("pm_table_version");
+        if (pm_ver) DUMP("PM Table Version:   0x%08X\n", pm_ver);
+    }
+
+    /* ── AOD scan ─────────────────────────────────────────────────── */
+    if (file_exists("/sys/kernel/aod_voltages/scan")) {
+        DUMP("\n--- AOD scan (/sys/kernel/aod_voltages/scan) ---\n");
+        FILE *sf = fopen("/sys/kernel/aod_voltages/scan", "r");
+        if (sf) {
+            char line[512];
+            while (fgets(line, sizeof(line), sf)) {
+                DUMP("%s", line);
+                if (off + 4096 >= cap) {
+                    DUMP("\n... (AOD scan truncated, buffer full)\n");
+                    break;
+                }
+            }
+            fclose(sf);
+        } else {
+            DUMP("  (failed to read /sys/kernel/aod_voltages/scan)\n");
+        }
+    } else {
+        DUMP("\n--- AOD scan: unavailable (aod_voltages module not loaded) ---\n");
+    }
+
+    /* ── PM table raw floats ──────────────────────────────────────── */
+    DUMP("\n=== PM Table Raw Entries ===\n");
+    {
+        float *t = NULL;
+        int count = 0;
+        if (read_pm_table_raw(&t, &count)) {
+            DUMP("Total entries: %d\n\n", count);
+            DUMP("%-8s  %-14s\n", "Index", "Value");
+            DUMP("%-8s  %-14s\n", "-----", "-----");
+            for (int i = 0; i < count; i++) {
+                DUMP("[%4d]    %14.6f\n", i, (double)t[i]);
+                /* Resize guard — leave 4KB headroom */
+                if (off + 4096 >= cap) {
+                    DUMP("\n... (truncated at entry %d, buffer full)\n", i);
+                    break;
+                }
+            }
+            free(t);
+        } else {
+            DUMP("(PM table unavailable)\n");
+        }
+    }
+
+#undef DUMP
+    return buf;
+}

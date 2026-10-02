@@ -1,0 +1,16 @@
+[Wed Sep  2 18:41:52 2026]
+FATAL ERROR: Rounding was 0.4995664886, expected less than 0.4
+Hardware failure detected running 960K FFT size, consult stress.txt file.
+[Thu Sep  3 12:39:48 2026]
+FATAL ERROR: Rounding was 0.5, expected less than 0.4
+Hardware failure detected running 960K FFT size, consult stress.txt file.
+FATAL ERROR: Rounding was 0.499902602, expected less than 0.4
+Hardware failure detected running 960K FFT size, consult stress.txt file.
+FATAL ERROR: Rounding was 0.4998576135, expected less than 0.4
+Hardware failure detected running 960K FFT size, consult stress.txt file.
+FATAL ERROR: Rounding was 0.4997547609, expected less than 0.4
+Hardware failure detected running 960K FFT size, consult stress.txt file.
+FATAL ERROR: Rounding was 0.4996716513, expected less than 0.4
+Hardware failure detected running 960K FFT size, consult stress.txt file.
+FATAL ERROR: Rounding was 0.5, expected less than 0.4
+Hardware failure detected running 960K FFT size, consult stress.txt file.

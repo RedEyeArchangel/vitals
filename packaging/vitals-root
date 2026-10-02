@@ -1,0 +1,23 @@
+#!/bin/sh
+# Launches vitals as root via a graphical polkit password prompt (pkexec),
+# instead of requiring a terminal + `sudo vitals`. pkexec needs an absolute
+# path (it doesn't search PATH) and, unlike sudo -E, strips the display
+# environment unconditionally — so this captures it from the *current*
+# (unprivileged) shell, which inherited it correctly from the desktop
+# session, and re-injects it into the elevated process explicitly. Same
+# XDG_RUNTIME_DIR/WAYLAND_DISPLAY issue the README documents for `sudo`.
+# Not `exec`: on failure we still need to run below to tell the user why,
+# since Terminal=false means a silently-failing pkexec (missing polkit
+# agent, dismissed auth) otherwise looks like nothing happened at all.
+pkexec env \
+    DISPLAY="$DISPLAY" \
+    XAUTHORITY="$XAUTHORITY" \
+    WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
+    XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+    /usr/bin/vitals
+status=$?
+if [ "$status" -ne 0 ] && command -v notify-send >/dev/null 2>&1; then
+    notify-send -u critical "vitals (root)" \
+        "Elevation failed (pkexec exit $status). No polkit authentication agent running? Try 'sudo -E vitals' from a terminal instead."
+fi
+exit "$status"

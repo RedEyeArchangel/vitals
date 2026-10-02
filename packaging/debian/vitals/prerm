@@ -1,0 +1,10 @@
+#!/bin/sh
+# Stop the service before its unit file/binary are removed, so dpkg never
+# leaves an enabled unit pointing at a deleted executable.
+set -e
+
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    systemctl disable --now vitals-ramocd.service >/dev/null 2>&1 || true
+fi
+
+exit 0

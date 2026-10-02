@@ -1,0 +1,20 @@
+#!/bin/sh
+# Packaged counterpart of scripts/install-daemons.sh, minus the activation step
+# (installing a package must not start a root daemon by itself).
+set -e
+
+if [ "$1" = "configure" ]; then
+    getent group vitals-gpu >/dev/null || groupadd --system vitals-gpu
+
+    # Deliberately NOT enabled/started here: vitals never activates its
+    # daemons on its own (Settings -> Daemons shows these same commands).
+    if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+        systemctl daemon-reload
+    fi
+
+    echo "vitals-gpud installed but not started. To activate GPU overclocking/fan control:"
+    echo "  sudo systemctl enable --now vitals-gpud"
+    echo "  sudo usermod -aG vitals-gpu \$USER   # then log out and back in"
+fi
+
+exit 0

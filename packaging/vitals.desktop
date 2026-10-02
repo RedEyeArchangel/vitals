@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=vitals
+Comment=Dear ImGui system monitor (CPU/memory/disks/network/GPU)
+Exec=vitals
+Icon=vitals
+Terminal=false
+Categories=System;Monitor;
+StartupWMClass=vitals

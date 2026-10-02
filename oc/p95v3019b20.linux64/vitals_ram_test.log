@@ -1,0 +1,93 @@
+[Main thread Sep  3 12:39] Starting workers.
+[Worker #2 Sep  3 12:39] Worker starting
+[Worker #3 Sep  3 12:39] Worker starting
+[Worker #5 Sep  3 12:39] Worker starting
+[Worker #4 Sep  3 12:39] Worker starting
+[Worker #2 Sep  3 12:39] Beginning a continuous torture test on your computer.
+[Worker #5 Sep  3 12:39] Beginning a continuous torture test on your computer.
+[Worker #5 Sep  3 12:39] Please read stress.txt.  Hit ^C to end this test.
+[Worker #8 Sep  3 12:39] Worker starting
+[Worker #2 Sep  3 12:39] Please read stress.txt.  Hit ^C to end this test.
+[Worker #6 Sep  3 12:39] Worker starting
+[Worker #11 Sep  3 12:39] Worker starting
+[Worker #3 Sep  3 12:39] Beginning a continuous torture test on your computer.
+[Worker #3 Sep  3 12:39] Please read stress.txt.  Hit ^C to end this test.
+[Worker #9 Sep  3 12:39] Worker starting
+[Worker #10 Sep  3 12:39] Worker starting
+[Worker #8 Sep  3 12:39] Beginning a continuous torture test on your computer.
+[Worker #8 Sep  3 12:39] Please read stress.txt.  Hit ^C to end this test.
+[Worker #10 Sep  3 12:39] Beginning a continuous torture test on your computer.
+[Worker #10 Sep  3 12:39] Please read stress.txt.  Hit ^C to end this test.
+[Worker #6 Sep  3 12:39] Beginning a continuous torture test on your computer.
+[Worker #6 Sep  3 12:39] Please read stress.txt.  Hit ^C to end this test.
+[Worker #9 Sep  3 12:39] Beginning a continuous torture test on your computer.
+[Worker #9 Sep  3 12:39] Please read stress.txt.  Hit ^C to end this test.
+[Worker #1 Sep  3 12:39] Worker starting
+[Worker #12 Sep  3 12:39] Worker starting
+[Worker #7 Sep  3 12:39] Worker starting
+[Worker #4 Sep  3 12:39] Beginning a continuous torture test on your computer.
+[Worker #4 Sep  3 12:39] Please read stress.txt.  Hit ^C to end this test.
+[Worker #12 Sep  3 12:39] Beginning a continuous torture test on your computer.
+[Worker #12 Sep  3 12:39] Please read stress.txt.  Hit ^C to end this test.
+[Worker #7 Sep  3 12:39] Beginning a continuous torture test on your computer.
+[Worker #7 Sep  3 12:39] Please read stress.txt.  Hit ^C to end this test.
+[Worker #1 Sep  3 12:39] Beginning a continuous torture test on your computer.
+[Worker #1 Sep  3 12:39] Please read stress.txt.  Hit ^C to end this test.
+[Worker #11 Sep  3 12:39] Beginning a continuous torture test on your computer.
+[Worker #11 Sep  3 12:39] Please read stress.txt.  Hit ^C to end this test.
+[Worker #2 Sep  3 12:39] Test 1, 16000 Lucas-Lehmer iterations of M18474367 using FMA3 FFT length 960K, Pass1=768, Pass2=1280, clm=1, 2 threads.
+[Worker #12 Sep  3 12:39] Test 1, 16000 Lucas-Lehmer iterations of M18474367 using FMA3 FFT length 960K, Pass1=768, Pass2=1280, clm=1, 2 threads.
+[Worker #9 Sep  3 12:39] Test 1, 16000 Lucas-Lehmer iterations of M18474367 using FMA3 FFT length 960K, Pass1=768, Pass2=1280, clm=1, 2 threads.
+[Worker #10 Sep  3 12:39] Test 1, 16000 Lucas-Lehmer iterations of M18474367 using FMA3 FFT length 960K, Pass1=768, Pass2=1280, clm=1, 2 threads.
+[Worker #3 Sep  3 12:39] Test 1, 16000 Lucas-Lehmer iterations of M18474367 using FMA3 FFT length 960K, Pass1=768, Pass2=1280, clm=1, 2 threads.
+[Worker #8 Sep  3 12:39] Test 1, 16000 Lucas-Lehmer iterations of M18474367 using FMA3 FFT length 960K, Pass1=768, Pass2=1280, clm=1, 2 threads.
+[Worker #7 Sep  3 12:39] Test 1, 16000 Lucas-Lehmer iterations of M18474367 using FMA3 FFT length 960K, Pass1=768, Pass2=1280, clm=1, 2 threads.
+[Worker #6 Sep  3 12:39] Test 1, 16000 Lucas-Lehmer iterations of M18474367 using FMA3 FFT length 960K, Pass1=768, Pass2=1280, clm=1, 2 threads.
+[Worker #5 Sep  3 12:39] Test 1, 16000 Lucas-Lehmer iterations of M18474367 using FMA3 FFT length 960K, Pass1=768, Pass2=1280, clm=1, 2 threads.
+[Worker #1 Sep  3 12:39] Test 1, 16000 Lucas-Lehmer iterations of M18474367 using FMA3 FFT length 960K, Pass1=768, Pass2=1280, clm=1, 2 threads.
+[Worker #4 Sep  3 12:39] Test 1, 16000 Lucas-Lehmer iterations of M18474367 using FMA3 FFT length 960K, Pass1=768, Pass2=1280, clm=1, 2 threads.
+[Worker #11 Sep  3 12:39] Test 1, 16000 Lucas-Lehmer iterations of M18474367 using FMA3 FFT length 960K, Pass1=768, Pass2=1280, clm=1, 2 threads.
+[Main thread Sep  3 12:39] TORTURE TEST FAILED on worker #9.
+[Worker #9 Sep  3 12:39] FATAL ERROR: Rounding was 0.5, expected less than 0.4
+[Worker #9 Sep  3 12:39] Hardware failure detected running 960K FFT size, consult stress.txt file.
+[Worker #9 Sep  3 12:39] Torture Test completed 0 tests in 0 minutes - 1 errors, 0 warnings.
+[Worker #9 Sep  3 12:39] Worker stopped.
+[Main thread Sep  3 12:40] TORTURE TEST FAILED on worker #6.
+[Worker #6 Sep  3 12:40] FATAL ERROR: Rounding was 0.499902602, expected less than 0.4
+[Worker #6 Sep  3 12:40] Hardware failure detected running 960K FFT size, consult stress.txt file.
+[Worker #6 Sep  3 12:40] Torture Test completed 0 tests in 0 minutes - 1 errors, 0 warnings.
+[Main thread Sep  3 12:40] TORTURE TEST FAILED on worker #3.
+[Worker #3 Sep  3 12:40] FATAL ERROR: Rounding was 0.4998576135, expected less than 0.4
+[Worker #3 Sep  3 12:40] Hardware failure detected running 960K FFT size, consult stress.txt file.
+[Main thread Sep  3 12:40] TORTURE TEST FAILED on worker #12.
+[Worker #12 Sep  3 12:40] FATAL ERROR: Rounding was 0.4997547609, expected less than 0.4
+[Worker #12 Sep  3 12:40] Hardware failure detected running 960K FFT size, consult stress.txt file.
+[Main thread Sep  3 12:40] TORTURE TEST FAILED on worker #4.
+[Worker #4 Sep  3 12:40] FATAL ERROR: Rounding was 0.4996716513, expected less than 0.4
+[Worker #4 Sep  3 12:40] Hardware failure detected running 960K FFT size, consult stress.txt file.
+[Main thread Sep  3 12:40] TORTURE TEST FAILED on worker #8.
+[Worker #8 Sep  3 12:40] FATAL ERROR: Rounding was 0.5, expected less than 0.4
+[Worker #8 Sep  3 12:40] Hardware failure detected running 960K FFT size, consult stress.txt file.
+[Worker #6 Sep  3 12:40] Worker stopped.
+[Worker #3 Sep  3 12:40] Torture Test completed 0 tests in 0 minutes - 1 errors, 0 warnings.
+[Worker #3 Sep  3 12:40] Worker stopped.
+[Worker #8 Sep  3 12:40] Torture Test completed 0 tests in 0 minutes - 1 errors, 0 warnings.
+[Worker #12 Sep  3 12:40] Torture Test completed 0 tests in 0 minutes - 1 errors, 0 warnings.
+[Worker #4 Sep  3 12:40] Torture Test completed 0 tests in 0 minutes - 1 errors, 0 warnings.
+[Worker #8 Sep  3 12:40] Worker stopped.
+[Worker #12 Sep  3 12:40] Worker stopped.
+[Worker #4 Sep  3 12:40] Worker stopped.
+[Main thread Sep  3 12:40] Stopping all worker windows.
+[Worker #7 Sep  3 12:40] Torture Test completed 0 tests in 0 minutes - 0 errors, 0 warnings.
+[Worker #7 Sep  3 12:40] Worker stopped.
+[Worker #10 Sep  3 12:40] Torture Test completed 0 tests in 0 minutes - 0 errors, 0 warnings.
+[Worker #10 Sep  3 12:40] Worker stopped.
+[Worker #2 Sep  3 12:40] Torture Test completed 0 tests in 0 minutes - 0 errors, 0 warnings.
+[Worker #2 Sep  3 12:40] Worker stopped.
+[Worker #5 Sep  3 12:40] Torture Test completed 0 tests in 0 minutes - 0 errors, 0 warnings.
+[Worker #5 Sep  3 12:40] Worker stopped.
+[Worker #1 Sep  3 12:40] Torture Test completed 0 tests in 0 minutes - 0 errors, 0 warnings.
+[Worker #11 Sep  3 12:40] Torture Test completed 0 tests in 0 minutes - 0 errors, 0 warnings.
+[Worker #1 Sep  3 12:40] Worker stopped.
+[Worker #11 Sep  3 12:40] Worker stopped.
+[Main thread Sep  3 12:40] Execution halted.

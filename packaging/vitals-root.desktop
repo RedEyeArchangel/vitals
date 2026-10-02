@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=vitals (root)
+Comment=vitals with full SMU/DRAM telemetry and GPU controls (asks for your password)
+Exec=vitals-root
+Icon=vitals
+Terminal=false
+Categories=System;Monitor;
+StartupWMClass=vitals

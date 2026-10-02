@@ -1,0 +1,14 @@
+[Unit]
+Description=vitals RAM/SMU telemetry daemon (DRAM timings, SMU voltages, memory benchmark)
+# ryzen_smu (if installed) is loaded by systemd-modules-load; SMU reads need it present.
+After=systemd-modules-load.service
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/vitals/ram_oc_daemon --foreground
+User=root
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

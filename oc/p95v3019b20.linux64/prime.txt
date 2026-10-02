@@ -1,0 +1,13 @@
+TortureMem=51375
+TortureAlternateInPlace=0
+NumWorkers=2
+WorkPreference=0
+CoresPerTest=6
+ComputerGUID=083467ddf5eb91e02127cafbefac67df
+
+[Internals]
+OldCpuSpeed=4850
+NewCpuSpeedCount=0
+NewCpuSpeed=0
+V30OptionsConverted=1
+WGUID_version=2

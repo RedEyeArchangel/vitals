@@ -1,0 +1,13 @@
+[Thu Sep  3 12:34:55 2026 - ver 30.19]
+Error opening results file to output this message:
+FATAL ERROR: Rounding was 0.4997885847, expected less than 0.4
+Error opening results file to output this message:
+Hardware failure detected running 960K FFT size, consult stress.txt file.
+Error opening results file to output this message:
+FATAL ERROR: Rounding was 0.4998974851, expected less than 0.4
+Error opening results file to output this message:
+Hardware failure detected running 960K FFT size, consult stress.txt file.
+Error opening results file to output this message:
+FATAL ERROR: Rounding was 0.5, expected less than 0.4
+Error opening results file to output this message:
+Hardware failure detected running 960K FFT size, consult stress.txt file.

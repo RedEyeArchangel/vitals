@@ -1,0 +1,17 @@
+[Unit]
+Description=vitals GPU control daemon (power limit / fan / clock settings)
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/gpu_ctl_daemon
+User=root
+Restart=on-failure
+RestartSec=2
+# Not sandboxed with ProtectSystem=strict/ProtectHome etc: this daemon's
+# entire job is writing to root-owned files under /sys and /etc/vitals, and
+# dlopen()-ing vendor driver libraries (libnvidia-ml.so.1, libnvidia-api.so.1)
+# that live outside any predictable confined path across distros.
+
+[Install]
+WantedBy=multi-user.target

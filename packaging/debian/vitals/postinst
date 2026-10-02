@@ -1,0 +1,17 @@
+#!/bin/sh
+# Refresh desktop/icon caches so the new entry shows up without a re-login.
+# No-ops safely if these tools aren't installed.
+set -e
+
+if [ "$1" = "configure" ]; then
+    command -v update-desktop-database >/dev/null 2>&1 && \
+        update-desktop-database -q /usr/share/applications || true
+    command -v gtk-update-icon-cache >/dev/null 2>&1 && \
+        gtk-update-icon-cache -qf /usr/share/icons/hicolor || true
+    # Unit installed but not enabled: activation is the user's one explicit step.
+    command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ] && systemctl daemon-reload || true
+    echo "Optional: enable RAM/SMU telemetry (starts now and at every boot):"
+    echo "  sudo systemctl enable --now vitals-ramocd"
+fi
+
+exit 0

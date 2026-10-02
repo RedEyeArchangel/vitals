@@ -1,0 +1,53 @@
+# Pushing an annotated tag like v1.0 creates a GitHub release:
+#   title  = first line of the tag message (e.g. "vitals v1.0")
+#   notes  = the rest of the tag message
+#   assets = both .deb packages built here (GitHub adds the source .zip/.tar.gz itself)
+#
+#   git tag -a v1.0 -m "vitals v1.0" -m "release notes ..."
+#   git push origin v1.0
+name: Release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # checkout fetches only the commit; fetch the annotated tag object so its message is readable.
+      - name: Fetch tag message
+        run: git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake git pkg-config \
+            libgl-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+            libwayland-dev libwayland-bin libxkbcommon-dev wayland-protocols \
+            libgtk-3-dev libayatana-appindicator3-dev
+
+      - name: Build .deb packages
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j"$(nproc)"
+          cd build && cpack
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="$(git tag -l --format='%(contents:subject)' "$GITHUB_REF_NAME")"
+          git tag -l --format='%(contents:body)' "$GITHUB_REF_NAME" > notes.md
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            # Release already exists (e.g. created by hand or a re-run): refresh it.
+            gh release edit "$GITHUB_REF_NAME" --title "${title:-$GITHUB_REF_NAME}" --notes-file notes.md
+            gh release upload "$GITHUB_REF_NAME" build/*.deb --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" build/*.deb \
+              --verify-tag \
+              --title "${title:-$GITHUB_REF_NAME}" \
+              --notes-file notes.md
+          fi
