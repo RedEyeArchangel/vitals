@@ -228,8 +228,6 @@ float ReadIntelGpuBusyPercent() {
 }
 
 // ---- AMD overdrive/fan baseline (see gpu_sysfs.h) -------------------------
-// Same line formats gpu_ctl_daemon/amd_backend.cpp parses — duplicated, not
-// shared, since that daemon is a separate binary with its own sysfs helpers.
 
 void ParseOdClkVoltage(const std::string& text, AmdOdState* s) {
     std::istringstream iss(text);
@@ -289,18 +287,30 @@ int ParseActiveProfile(const std::string& text) {
     return -1;
 }
 
-std::vector<int> ParseDpmLevels(const std::string& text, int* activeOut) {
-    // "0: 500Mhz \n1: 2254Mhz *" — RDNA3 also prints an "S: 187Mhz" sleep row, skipped.
+std::vector<int> ParseDpmLevels(const std::string& text, int* activeOut, bool fineGrained) {
+    // "0: 500Mhz \n1: 2254Mhz *" — RDNA3 in deep sleep prints an "S: 187Mhz *"
+    // row first and then numbers the real levels from 1 ("1: 500Mhz", "2: ...");
+    // they're still written back as 0-based levels, so shift by the sleep row.
     std::vector<int> out;
     std::istringstream iss(text);
     std::string line;
+    int first = 0, active = -1;
+    bool sleepRow = false;
     while (std::getline(iss, line)) {
         int idx, mhz;
-        if (std::sscanf(line.c_str(), " %d: %d", &idx, &mhz) == 2 && idx == (int)out.size()) {
-            if (activeOut && line.find('*') != std::string::npos) *activeOut = idx;
+        if (line.compare(0, 2, "S:") == 0) { sleepRow = true; continue; }
+        if (std::sscanf(line.c_str(), " %d: %d", &idx, &mhz) != 2) continue;
+        if (out.empty() && sleepRow && idx == 1) first = 1; // older kernels keep "0:" after "S:"
+        if (idx - first == (int)out.size()) {
+            if (line.find('*') != std::string::npos) active = idx - first;
             out.push_back(mhz);
         }
     }
+    // Fine-grained clocks (RDNA GFXCLK) have just min/max; between them the
+    // kernel inserts the *current* clock as a starred middle row, which is
+    // not a selectable level (the driver only takes 0 = min, 1 = max).
+    if (fineGrained && out.size() == 3 && active == 1) { out = {out[0], out[2]}; active = -1; }
+    if (activeOut) *activeOut = active;
     return out;
 }
 
@@ -337,7 +347,7 @@ AmdOdState ReadAmdOdState(const std::string& pciSlot) {
     ParseOdClkVoltage(ReadFile(dev + "/pp_od_clk_voltage"), &s);
     s.perfLevel = ReadTrimmed(dev + "/power_dpm_force_performance_level");
     s.activeProfile = ParseActiveProfile(ReadFile(dev + "/pp_power_profile_mode"));
-    s.sclkLevelsMhz = ParseDpmLevels(ReadFile(dev + "/pp_dpm_sclk"));
+    s.sclkLevelsMhz = ParseDpmLevels(ReadFile(dev + "/pp_dpm_sclk"), nullptr, true);
     s.mclkLevelsMhz = ParseDpmLevels(ReadFile(dev + "/pp_dpm_mclk"), &s.mclkActiveLevel);
 
     std::string fc = dev + "/gpu_od/fan_ctrl/";

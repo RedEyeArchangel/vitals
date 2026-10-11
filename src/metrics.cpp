@@ -319,15 +319,6 @@ void Metrics::Update(double dt) {
         // stay an honest "N/A" rather than guessing at an unrelated channel.
     }
 
-    // --- gpu_ctl_daemon reachability + per-GPU caps (see gpu_ctl/gpu_ctl.h) ---
-    // Just a PING+LIST_GPUS round-trip, cheap even on failure, but still
-    // throttled to the same cadence as the other daemon-backed checks above
-    // rather than doing a socket connect() every frame.
-    if (t - gpuCtlRefreshT_ > 1.5) {
-        RefreshGpuCtl(gpuCtl);
-        gpuCtlRefreshT_ = t;
-    }
-
     // --- Network: sum of all interfaces except loopback ---
     {
         uint64_t rxBytes = 0, txBytes = 0;

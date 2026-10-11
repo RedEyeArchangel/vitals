@@ -9,7 +9,6 @@
 
 #include <algorithm>
 #include <cstring>
-#include <grp.h>
 #include <string>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -35,16 +34,6 @@ void OpenLogFile(const std::string& path) {
 }
 
 bool FileExists(const std::string& p) { struct stat st; return stat(p.c_str(), &st) == 0; }
-
-bool InGroup(const char* name) {
-    struct group* gr = getgrnam(name);
-    if (!gr) return false;
-    if (getegid() == gr->gr_gid) return true;
-    gid_t groups[256];
-    int n = getgroups(256, groups);
-    for (int i = 0; i < n; ++i) if (groups[i] == gr->gr_gid) return true;
-    return false;
-}
 
 // ---- layout primitives ------------------------------------------------------
 
@@ -170,7 +159,7 @@ void DrawMonitoring(float width) {
     GroupTitle("Monitoring");
     BeginGroupCard("##monitoring", width);
 
-    Row("Expert mode", "Advanced telemetry (SMU voltages, DRAM timings, GPU/VRAM clocks) and the GPU Overclock / Fan Control tabs.", ToggleW(), true);
+    Row("Expert mode", "Advanced telemetry (SMU voltages, DRAM timings, GPU/VRAM clocks).", ToggleW(), true);
     Widgets::ToggleSwitch("##expert", &Theme::ExpertMode);
     RowEnd();
 
@@ -283,19 +272,18 @@ void ServiceCard(const char* id, const char* unit, const char* desc, bool runnin
 }
 
 void DrawDaemons(const Metrics& m, float width) {
-    GroupTitle("Daemons", "Optional root helpers. Like LACT, you activate them once; after that they start at every boot until you turn them off.");
+    GroupTitle("Daemons", "Optional root helper. You activate it once; after that it starts at every boot until you turn it off.");
 
-    bool gpudRunning = m.gpuCtl.daemonReachable;
     DaemonStatus rs = GetRamOcDaemonStatus();
-    if (!ReadService("vitals-ramocd").installed || !ReadService("vitals-gpud").installed) {
+    if (!ReadService("vitals-ramocd").installed) {
         BeginGroupCard("##setup", width);
         ImGui::Dummy(ImVec2(0, Theme::Scale(8.0f)));
         ImGui::PushFont(Theme::LoadedFonts.bodyBold);
         ImGui::TextColored(Theme::kTextPrimary, "One-time setup");
         ImGui::PopFont();
-        Hint("Installs both daemons as system services, starts them, and enables them at boot:");
+        Hint("Installs the daemon as a system service, starts it, and enables it at boot:");
         std::string script = InstallScriptCommand();
-        CommandRow("setup", script.empty() ? "sudo systemctl enable --now vitals-ramocd vitals-gpud" : script);
+        CommandRow("setup", script.empty() ? "sudo systemctl enable --now vitals-ramocd" : script);
         ImGui::Dummy(ImVec2(0, Theme::Scale(10.0f)));
         EndGroupCard();
         ImGui::Dummy(ImVec2(0, Theme::Scale(8.0f)));
@@ -304,22 +292,6 @@ void DrawDaemons(const Metrics& m, float width) {
     ServiceCard("##ramoc", "vitals-ramocd", "RAM timings, SMU voltages and clocks (Expert mode) and the memory benchmark.",
                 rs.running, rs.running ? (m.dramOc.smuSupported ? "SMU ACCESS" : "NO SMU ACCESS") : nullptr,
                 m.dramOc.smuSupported ? Theme::kAccentOk : Theme::kAccentTemp, width);
-    ServiceCard("##gpud", "vitals-gpud", "GPU overclocking and fan control (Expert mode \xE2\x86\x92 Performance \xE2\x86\x92 GPU).",
-                gpudRunning, nullptr, ImVec4(), width);
-
-    bool socketThere = FileExists("/run/vitals_gpud_v" VITALS_GPUCTL_IPC_VERSION_STR ".sock");
-    if (socketThere && !InGroup("vitals-gpu")) {
-        ImGui::TextColored(Theme::kAccentTemp, "vitals-gpud runs, but your user can't reach it yet. Join its group, then log out and back in:");
-        CommandRow("gpud_group", "sudo usermod -aG vitals-gpu $USER");
-    }
-    if (FileExists("/run/lactd.sock")) {
-        ImGui::Dummy(ImVec2(0, Theme::Scale(4.0f)));
-        Widgets::StatusPill("LACT RUNNING", Theme::kAccentTemp);
-        ImGui::SameLine();
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextColored(Theme::kAccentTemp, "LACT controls the same GPU settings \xE2\x80\x94 use one of them:");
-        CommandRow("lact_stop", "sudo systemctl disable --now lactd");
-    }
 }
 
 void DrawReset(float width) {

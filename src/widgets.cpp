@@ -221,59 +221,6 @@ void Sparkline(const RingBuffer& history, ImVec4 color, ImVec2 size) {
     ImGui::Dummy(size);
 }
 
-bool CurveEditor(const char* id, std::vector<ImVec2>& points, ImVec2 size,
-                  ImVec2 xRange, ImVec2 yRange, ImVec4 color,
-                  const char* xLabel, const char* yLabel, const char* yTickFmt, const char* pointLabelFmt) {
-    ImGui::PushID(id);
-    bool changed = false;
-
-    // Same plot theme as PushPlotTheme()/PopPlotTheme() (pages/page_common.cpp)
-    // duplicated rather than called: that pair lives in the pages layer,
-    // which depends on widgets.h, not the other way around.
-    ImPlot::PushStyleColor(ImPlotCol_FrameBg, Theme::kBgPanelAlt);
-    ImPlot::PushStyleColor(ImPlotCol_PlotBg, Theme::kBgPanelAlt);
-    ImPlot::PushStyleColor(ImPlotCol_AxisGrid, ImVec4(1, 1, 1, 0.05f));
-    if (ImPlot::BeginPlot("##curve", size, ImPlotFlags_NoTitle | ImPlotFlags_NoMenus | ImPlotFlags_NoBoxSelect | ImPlotFlags_NoLegend)) {
-        ImPlot::SetupAxes(xLabel, yLabel, ImPlotAxisFlags_None, ImPlotAxisFlags_None);
-        if (yTickFmt) ImPlot::SetupAxisFormat(ImAxis_Y1, yTickFmt);
-        ImPlot::SetupAxisLimits(ImAxis_X1, xRange.x, xRange.y, ImGuiCond_Always);
-        ImPlot::SetupAxisLimits(ImAxis_Y1, yRange.x, yRange.y, ImGuiCond_Always);
-
-        if (points.size() >= 2) {
-            std::vector<double> xs(points.size()), ys(points.size());
-            for (size_t i = 0; i < points.size(); ++i) { xs[i] = points[i].x; ys[i] = points[i].y; }
-            ImPlot::SetNextLineStyle(color, 2.0f);
-            ImPlot::PlotLine("##line", xs.data(), ys.data(), (int)points.size());
-        }
-
-        for (size_t i = 0; i < points.size(); ++i) {
-            double x = points[i].x, y = points[i].y;
-            if (ImPlot::DragPoint((int)i, &x, &y, color, Theme::Scale(7.0f))) {
-                // Clamp to the axis range, then to this point's neighbors on
-                // x so the curve stays monotonic (a fan/VF curve dragged past
-                // its neighbor would otherwise cross itself, which neither
-                // gpu_ctl_daemon's interpolation nor the driver's own VF
-                // parser expects an ordered-by-x curve to do).
-                double xlo = i == 0 ? xRange.x : points[i - 1].x;
-                double xhi = i + 1 == points.size() ? xRange.y : points[i + 1].x;
-                x = std::clamp(x, xlo, xhi);
-                y = std::clamp(y, (double)yRange.x, (double)yRange.y);
-                points[i] = ImVec2((float)x, (float)y);
-                changed = true;
-            }
-            if (pointLabelFmt) {
-                char buf[48]; std::snprintf(buf, sizeof(buf), pointLabelFmt, points[i].y, points[i].x);
-                ImPlot::PlotText(buf, points[i].x, points[i].y, ImVec2(0, 16));
-            }
-        }
-        ImPlot::EndPlot();
-    }
-    ImPlot::PopStyleColor(3);
-
-    ImGui::PopID();
-    return changed;
-}
-
 void ValueBar(float value01, ImVec4 color, float width, float height) {
     value01 = std::clamp(value01, 0.0f, 1.0f);
     ImVec2 p = ImGui::GetCursorScreenPos();
@@ -315,49 +262,6 @@ bool SegmentedTabs(const char* id, const char* const* labels, int count, int* se
         ImGui::PopStyleColor(2);
     }
     ImGui::PopStyleVar(3);
-    ImGui::PopID();
-    return changed;
-}
-
-bool EditRowInt(const char* label, int* value, int vmin, int vmax, int baseline, float width, const char* unit) {
-    ImGui::PushID(label);
-    bool modified = *value != baseline;
-    bool changed = false;
-    // Visible text stops at "##" (ImGui ID convention), so a label can carry a unique ID.
-    const char* labelEnd = std::strstr(label, "##");
-    if (!labelEnd) labelEnd = label + std::strlen(label);
-    float textW = ImGui::CalcTextSize(label, labelEnd).x + ImGui::CalcTextSize("\xE2\x97\x8F ").x;
-    // Common label column so sliders line up across rows (LACT-style), widened only for long labels.
-    float labelW = std::max(width * 0.25f, textW + Theme::Scale(16.0f));
-    float inputW = Theme::Scale(150.0f);
-    float resetW = ImGui::GetFrameHeight();
-    float sliderW = std::max(Theme::Scale(60.0f), width - labelW - inputW - resetW - ImGui::GetStyle().ItemSpacing.x * 3);
-
-    ImGui::AlignTextToFramePadding();
-    if (modified) ImGui::TextColored(Theme::kAccentTemp, "\xE2\x97\x8F %.*s", (int)(labelEnd - label), label); // ● label
-    else ImGui::TextColored(Theme::kTextPrimary, "%.*s", (int)(labelEnd - label), label);
-    if (modified && ImGui::IsItemHovered()) ImGui::SetTooltip("was %d%s", baseline, unit);
-
-    ImGui::SameLine(labelW);
-    if (modified) ImGui::PushStyleColor(ImGuiCol_SliderGrab, Theme::kAccentTemp);
-    ImGui::SetNextItemWidth(sliderW);
-    changed |= ImGui::SliderInt("##slider", value, vmin, vmax, "");
-    if (modified) ImGui::PopStyleColor();
-
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(inputW);
-    if (modified) ImGui::PushStyleColor(ImGuiCol_Text, Theme::kAccentTemp);
-    changed |= ImGui::InputInt("##num", value, 1, 10);
-    if (modified) ImGui::PopStyleColor();
-    *value = std::clamp(*value, vmin, vmax);
-
-    ImGui::SameLine();
-    if (modified) {
-        if (ImGui::Button("\xE2\x86\xBA", ImVec2(resetW, 0))) { *value = baseline; changed = true; } // ↺
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reset to %d%s", baseline, unit);
-    } else {
-        ImGui::Dummy(ImVec2(resetW, ImGui::GetFrameHeight()));
-    }
     ImGui::PopID();
     return changed;
 }

@@ -29,12 +29,9 @@ bool ReadNvidiaSmi(float* pctOut, double* tempOut);
 // call right after (re)start returns -1 while it establishes a baseline.
 float ReadIntelGpuBusyPercent();
 
-// ---- AMD overdrive/fan state, read-only (the GPU page's "baseline") -------
-// Everything here is user-readable sysfs under /sys/bus/pci/devices/<slot>/,
-// so the UI can show the card's *real* current settings without asking the
-// root daemon. A field whose node is missing stays at its has*=false/0
-// default. Parsers are split out (string in, struct out) so
-// tools/gpuctl_check.cpp can test them against captured RDNA3 text.
+// ---- AMD overdrive/fan state, read-only (GPU page stats header) -----------
+// Everything here is user-readable sysfs under /sys/bus/pci/devices/<slot>/.
+// A field whose node is missing stays at its has*=false/0 default.
 struct AmdRange { int min = 0, max = 0; };
 struct AmdOdState {
     bool valid = false;               // device dir readable at all
@@ -66,10 +63,11 @@ struct AmdOdState {
 
 AmdOdState ReadAmdOdState(const std::string& pciSlot);
 
-// Pure parsers (exposed for tools/gpuctl_check.cpp).
+// Pure parsers.
 void ParseOdClkVoltage(const std::string& text, AmdOdState* s);
 // One gpu_od/fan_ctrl file ("FAN_TARGET_TEMPERATURE:\n80\nOD_RANGE:\nTARGET_TEMPERATURE: 25 110").
 bool ParseFanCtrlValue(const std::string& text, int* value, AmdRange* range);
 void ParseFanCurve(const std::string& text, AmdOdState* s);
 int ParseActiveProfile(const std::string& text);
-std::vector<int> ParseDpmLevels(const std::string& text, int* activeOut = nullptr);
+// fineGrained: GFXCLK-style min/max table (drops the kernel's "current clock" middle row).
+std::vector<int> ParseDpmLevels(const std::string& text, int* activeOut = nullptr, bool fineGrained = false);

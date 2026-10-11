@@ -102,8 +102,6 @@ add_executable(vitals
     src/metrics/process_detail.cpp
     src/dram_oc/dram_oc.cpp
     src/dram_oc/daemon_ipc.cpp
-    src/gpu_ctl/gpu_ctl.cpp
-    src/gpu_ctl/gpu_ctl_ipc.cpp
     src/pages/page_common.cpp
     src/pages/summary/summary.cpp
     src/pages/performance/performance.cpp
@@ -195,45 +193,12 @@ if(RT_LIBRARY)
     target_link_libraries(ram_oc_daemon PRIVATE ${RT_LIBRARY}) # shm_open/shm_unlink on older glibc
 endif()
 
-# --- gpu_ctl_daemon: separate, root-only GPU control service ------------
-# LACT-master is MIT (unlike ram_oc/'s GPLv3), so unlike ram_oc_daemon this
-# split isn't a license requirement — it's a privilege one: AMD's
-# power1_cap/pwm1/pp_od_clk_voltage and NVML's Set* calls are root-only
-# unconditionally, and `vitals` itself must never run as root just to reach
-# them (see sensors.md's "never auto-elevates itself" policy). This binary
-# runs as a systemd service the user installs once (scripts/install-daemons.sh,
-# packaging/systemd/vitals-gpud.service) — never spawned by `vitals` (see
-# src/gpu_ctl/gpu_ctl_ipc.cpp, which only ever pings). Nvidia support dlopen's
-# libnvidia-ml.so.1/libnvidia-api.so.1 at runtime (nvml_dlopen.cpp,
-# nvidia_nvapi_shim.cpp) instead of linking against proprietary SDK headers,
-# so this target has no Nvidia SDK dependency either.
-add_executable(gpu_ctl_daemon
-    gpu_ctl_daemon/main.cpp
-    gpu_ctl_daemon/sysfs_io.cpp
-    gpu_ctl_daemon/amd_backend.cpp
-    gpu_ctl_daemon/nvml_dlopen.cpp
-    gpu_ctl_daemon/nvidia_backend.cpp
-    gpu_ctl_daemon/nvidia_nvapi_shim.cpp
-    gpu_ctl_daemon/config_store.cpp
-    gpu_ctl_daemon/pending_apply.cpp
-)
-target_include_directories(gpu_ctl_daemon PRIVATE include)
-target_link_libraries(gpu_ctl_daemon PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
-
-# Land all three executables side by side so vitals can find ram_oc_daemon
+# Land both executables side by side so vitals can find ram_oc_daemon
 # via /proc/self/exe regardless of cwd (see FindDaemonPath in
-# dram_oc/daemon_ipc.cpp) — gpu_ctl_daemon doesn't need the same trick
-# (it's never spawned by vitals, only pinged over its fixed socket path),
-# but there's no reason to scatter build output across two directories.
-set_target_properties(vitals ram_oc_daemon gpu_ctl_daemon PROPERTIES
+# dram_oc/daemon_ipc.cpp).
+set_target_properties(vitals ram_oc_daemon PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
 )
-
-# Assert-based self-check for gpu_ctl_daemon's parsers/sanitizer; not built by default.
-add_executable(gpuctl_check EXCLUDE_FROM_ALL tools/gpuctl_check.cpp gpu_ctl_daemon/amd_backend.cpp gpu_ctl_daemon/sysfs_io.cpp
-    src/metrics/gpu_sysfs.cpp src/metrics/proc_util.cpp)
-target_include_directories(gpuctl_check PRIVATE include src)
-target_link_libraries(gpuctl_check PRIVATE Threads::Threads)
 
 # --- app icon: rendered at build time from AppIcon::RenderSVG() ---------
 # Procedural (see src/app_icon.h) — dumping it to an .svg here avoids a
@@ -253,8 +218,7 @@ add_custom_target(vitals_icon ALL DEPENDS ${VITALS_ICON_SVG})
 # ram_oc_daemon must land next to `vitals` (FindDaemonPath in
 # src/dram_oc/daemon_ipc.cpp resolves it via /proc/self/exe's own
 # directory), so both go under a private dir with a /usr/bin symlink for
-# vitals. gpu_ctl_daemon has no such constraint — it's only ever reached
-# over its fixed socket path — so it installs as a normal sbin binary.
+# vitals.
 include(GNUInstallDirs)
 if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
     # /usr/local/share/applications isn't in most desktop environments'
@@ -298,19 +262,7 @@ install(DIRECTORY assets/fonts
     DESTINATION ${CMAKE_INSTALL_DATADIR}/vitals
     COMPONENT vitals)
 
-install(TARGETS gpu_ctl_daemon
-    RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
-    COMPONENT gpud)
-install(FILES packaging/systemd/vitals-gpud.service
-    DESTINATION lib/systemd/system # fixed systemd convention, not CMAKE_INSTALL_LIBDIR (which may be a multiarch dir)
-    COMPONENT gpud)
-
 # --- CPack: .deb packages ---------------------------------------------------
-# Two packages, matching the existing trust split: `vitals` never needs root
-# to install or run; `vitals-gpud` is the opt-in root service (see the
-# gpu_ctl_daemon comment block above and README's "GPU power limit / fan
-# curve" section) — installing it is what creates the vitals-gpu group and
-# enables the systemd unit, same as scripts/install-daemons.sh does by hand.
 set(CPACK_PACKAGE_NAME "vitals")
 set(CPACK_PACKAGE_VERSION "1.0.0")
 set(CPACK_PACKAGE_CONTACT "unspecified")
@@ -319,7 +271,7 @@ set(CPACK_GENERATOR "DEB")
 set(CPACK_DEB_COMPONENT_INSTALL ON)
 set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
 set(CPACK_DEBIAN_PACKAGE_SECTION "utils")
-set(CPACK_COMPONENTS_ALL vitals gpud)
+set(CPACK_COMPONENTS_ALL vitals)
 
 set(CPACK_DEBIAN_VITALS_PACKAGE_NAME "vitals")
 set(CPACK_DEBIAN_VITALS_FILE_NAME "vitals_${CPACK_PACKAGE_VERSION}_amd64.deb")
@@ -331,11 +283,5 @@ set(CPACK_DEBIAN_VITALS_PACKAGE_DEPENDS "pkexec")
 set(CPACK_DEBIAN_VITALS_PACKAGE_RECOMMENDS "policykit-1-gnome | polkit-kde-agent-1 | lxqt-policykit | xfce-polkit")
 set(CPACK_DEBIAN_VITALS_PACKAGE_CONTROL_EXTRA
     "${CMAKE_SOURCE_DIR}/packaging/debian/vitals/postinst;${CMAKE_SOURCE_DIR}/packaging/debian/vitals/prerm")
-
-set(CPACK_DEBIAN_GPUD_PACKAGE_NAME "vitals-gpud")
-set(CPACK_DEBIAN_GPUD_FILE_NAME "vitals-gpud_${CPACK_PACKAGE_VERSION}_amd64.deb")
-set(CPACK_DEBIAN_GPUD_PACKAGE_DEPENDS "vitals (= ${CPACK_PACKAGE_VERSION})")
-set(CPACK_DEBIAN_GPUD_PACKAGE_CONTROL_EXTRA
-    "${CMAKE_SOURCE_DIR}/packaging/debian/gpud/postinst;${CMAKE_SOURCE_DIR}/packaging/debian/gpud/prerm")
 
 include(CPack)

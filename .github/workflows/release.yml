@@ -1,7 +1,7 @@
 # Pushing an annotated tag like v1.0 creates a GitHub release:
-#   title  = first line of the tag message (e.g. "vitals v1.0")
-#   notes  = the rest of the tag message
-#   assets = both .deb packages built here (GitHub adds the source .zip/.tar.gz itself)
+#   title  = "vitals <tag>" (e.g. "vitals v1.0")
+#   notes  = the tag message
+#   assets = the .deb package built here (GitHub adds the source .zip/.tar.gz itself)
 #
 #   git tag -a v1.0 -m "vitals v1.0" -m "release notes ..."
 #   git push origin v1.0
@@ -39,15 +39,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          title="$(git tag -l --format='%(contents:subject)' "$GITHUB_REF_NAME")"
-          git tag -l --format='%(contents:body)' "$GITHUB_REF_NAME" > notes.md
+          title="vitals $GITHUB_REF_NAME"   # e.g. "vitals v1.0"
+          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" | sed 's/^  //' > notes.md   # whole tag message
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             # Release already exists (e.g. created by hand or a re-run): refresh it.
-            gh release edit "$GITHUB_REF_NAME" --title "${title:-$GITHUB_REF_NAME}" --notes-file notes.md
+            gh release edit "$GITHUB_REF_NAME" --title "$title" --notes-file notes.md
             gh release upload "$GITHUB_REF_NAME" build/*.deb --clobber
           else
             gh release create "$GITHUB_REF_NAME" build/*.deb \
               --verify-tag \
-              --title "${title:-$GITHUB_REF_NAME}" \
+              --title "$title" \
               --notes-file notes.md
           fi

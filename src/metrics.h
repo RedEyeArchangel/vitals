@@ -6,7 +6,6 @@
 #include <unordered_map>
 #include <cstdint>
 #include "dram_oc/dram_oc.h" // DramOcSummary — read via the ram_oc_helper subprocess, see dram_oc/dram_oc.h
-#include "gpu_ctl/gpu_ctl.h" // GpuCtlState — gpu_ctl_daemon reachability + caps, see gpu_ctl/gpu_ctl.h
 #include "benchmark_controller.h" // BenchmarkController — Benchmarks page orchestration, see Metrics::bench
 #include "metrics/process_detail.h" // ProcessDetail — Processes page "Properties" popup, on-demand only
 
@@ -174,11 +173,6 @@ struct Metrics {
     bool dramOcSupported = false;
     DramOcSummary dramOc{};
 
-    // ---- GPU: gpu_ctl_daemon reachability + per-GPU caps, see gpu_ctl/gpu_ctl.h.
-    // Live per-GPU config (GET_CONFIG/SET_CONFIG/CONFIRM/REVERT) is fetched
-    // on demand from the GPU Controls section (gpu.cpp), not cached here. ----
-    GpuCtlState gpuCtl{};
-
     // ---- Disk detail ----
     float diskActivePct = 0.0f;   // real %util, from /proc/diskstats "ms doing IO"
     float diskReadKBs = 0.0f;
@@ -265,7 +259,6 @@ private:
     double diskVolumesRefreshT_ = -1000.0;
     double servicesRefreshT_ = -1000.0;
     double dramOcRefreshT_ = -1000.0; // ReadDramOc() now forks a subprocess; throttle like the readers above
-    double gpuCtlRefreshT_ = -1000.0; // RefreshGpuCtl() is a socket round-trip; throttled like dramOcRefreshT_
     bool appsRead_ = false; // startupApps/installedApps/systemUsers: read once, rarely change
     void ScanApps(); // shared by Update()'s first-run read and RescanApps()
 };

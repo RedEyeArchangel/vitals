@@ -51,26 +51,7 @@ void InfoPill(const char* label, const char* value, ImVec2 size);
 // is fragile, so these draw directly with ImDrawList instead.
 void Sparkline(const RingBuffer& history, ImVec4 color, ImVec2 size);
 
-// Draggable curve editor (fan curve / VF curve): an ImPlot plot fixed to
-// [xRange,yRange] with one draggable point per entry in `points` (x/y in
-// whatever units the caller wants displayed — e.g. tempC/speed01 for a fan
-// curve, clockOffsetMHz/voltageMV for a VF curve) connected by a line.
-// Dragging a point clamps it to the axis range and keeps points ordered by
-// x (swapping neighbors instead of letting the curve cross itself).
-// Modifies `points` in place; returns true the frame anything moved, so
-// callers only need to push an Apply-eligible config when this is true.
-// Built on ImPlot::DragPoint (already an ImPlot 0.17 API, see CMakeLists.txt's
-// implot FetchContent pin) rather than a hand-rolled drag/hit-test — no
-// existing curve-editing widget in this file to build on otherwise.
-// Optional: xLabel/yLabel name the axes, yTickFmt formats Y ticks (e.g.
-// "%g%%"), pointLabelFmt draws a caption under each point, formatted with
-// (y, x) — e.g. "%.0f%% at %.0f\xC2\xB0" "C".
-bool CurveEditor(const char* id, std::vector<ImVec2>& points, ImVec2 size,
-                  ImVec2 xRange, ImVec2 yRange, ImVec4 color,
-                  const char* xLabel = nullptr, const char* yLabel = nullptr,
-                  const char* yTickFmt = nullptr, const char* pointLabelFmt = nullptr);
-
-// ---- LACT-style control-page widgets (GPU Overclock / Fan Control) ----
+// ---- LACT-style widgets ----
 
 // Flat rounded progress bar filling `width` (value01 clamped to [0,1]).
 void ValueBar(float value01, ImVec4 color, float width, float height);
@@ -80,11 +61,5 @@ bool ToggleSwitch(const char* id, bool* value);
 
 // Equal-width segmented buttons across `width`; returns true when *selected changed.
 bool SegmentedTabs(const char* id, const char* const* labels, int count, int* selected, float width);
-
-// One editable row: label | slider | number field with -/+ steps.
-// When *value != baseline the row is marked modified (accent label with a
-// leading dot, "was X" tooltip, and a reset button that restores baseline).
-// Returns true when the value changed this frame.
-bool EditRowInt(const char* label, int* value, int vmin, int vmax, int baseline, float width, const char* unit = "");
 
 } // namespace Widgets
